@@ -139,6 +139,26 @@ def incremental_valuations(provider, codes: list[str], cache: HistoryCache, cfg:
     return merged
 
 
+def load_industries(provider, codes: list[str], path: Path, workers: int, max_age_days: int = 90) -> dict[str, str]:
+    """所属行业：缓存在 state/industries.json 中，只为缺失或超过 max_age_days 天的股票请求数据源。"""
+    cache = load_json(path, {})
+    today = date.today()
+    todo = [c for c in codes
+            if c not in cache or (today - date.fromisoformat(cache[c]["updated"])).days >= max_age_days]
+    if todo and hasattr(provider, "industry"):
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(provider.industry, c): c for c in todo}
+            for fut in as_completed(futures):
+                code = futures[fut]
+                try:
+                    cache[code] = {"industry": fut.result(), "updated": today.isoformat()}
+                except Exception as e:  # 获取失败不影响主流程，下次运行再试
+                    log.warning("%s 行业获取失败: %s", code, e)
+        log.info("行业数据：更新 %d 只，缓存 %d 只", len(todo), len(cache))
+        dump_json(path, cache)
+    return {c: cache[c]["industry"] if c in cache else "未知" for c in codes}
+
+
 def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: bool = False,
         cache: HistoryCache | None = None) -> dict:
     rules = cfg["rules"]
@@ -150,6 +170,8 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
     index_names = {i["code"]: i["name"] for i in cfg["indices"]}
     log.info("共 %d 只成分股（去重后）", len(members))
 
+    workers = 1 if demo else max(1, int(cfg.get("workers", 4)))
+    industries = load_industries(provider, sorted(members), state_dir / "industries.json", workers)
     incremental = incremental_valuations(provider, sorted(members), cache, cfg) if cache else {}
 
     def fetch(code: str) -> tuple[dict, dict]:
@@ -167,7 +189,6 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
     # 耗时几乎全在网络请求上，多线程并发拉取；并发失败的再逐只串行补拉一次
     results: dict[str, tuple[dict, dict]] = {}
     errors: dict[str, Exception] = {}
-    workers = 1 if demo else max(1, int(cfg.get("workers", 4)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(fetch, code): code for code in sorted(members)}
         for n, fut in enumerate(as_completed(futures), 1):
@@ -197,11 +218,16 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
         sc = signals.score(m)
         m["score"] = sc["total"]
         sig, reasons, quality = signals.evaluate(m, rules)
-        stock = {"code": code, "name": info["name"], "indices": info["indices"], **m,
+        stock = {"code": code, "name": info["name"], "industry": industries[code], "indices": info["indices"], **m,
                  "score_parts": sc["parts"], "quality": quality, "signal": sig, "reasons": reasons}
         stocks.append(stock)
         dump_json(data_dir / "stocks" / f"{code}.json", {**series, "code": code, "name": info["name"]})
-        log.info("%s %s 股息率=%s 评分=%s 信号=%s", code, info["name"], m["yield"], m["score"], sig)
+        log.info("%s %s 股息率=%s 评分=%s 规则信号=%s", code, info["name"], m["yield"], m["score"], sig)
+
+    signals.limit_buys(stocks, int(rules["buy"].get("max_daily", 5)))
+    picks = sorted((s for s in stocks if s["signal"] == signals.BUY), key=lambda s: s["buy_rank"])
+    log.info("今日买入推荐 %d 只：%s；买入候选 %d 只", len(picks), "、".join(s["name"] for s in picks) or "无",
+             sum(bool(s.get("buy_candidate")) for s in stocks))
 
     if not stocks:
         raise RuntimeError("全部股票处理失败，请检查数据源")

@@ -83,3 +83,17 @@ def evaluate(m: dict, rules: dict) -> tuple[str, list[str], bool]:
     elif pe_pct is not None and pe_pct > b["max_pe_percentile"]:
         reasons.append(f"PE 分位 {pe_pct:.0f}% 偏高")
     return HOLD, reasons, quality
+
+
+def limit_buys(stocks: list[dict], max_buys: int) -> None:
+    """同时满足买入条件的股票按综合评分（其次股息率）排序，只保留前 max_buys 只为买入。
+
+    其余改为持有/观望并标记为买入候选（buy_candidate），不触发买入提醒。原地修改。
+    """
+    cands = sorted((s for s in stocks if s["signal"] == BUY), key=lambda s: (-s["score"], -(s.get("yield") or 0)))
+    for rank, s in enumerate(cands, 1):
+        s["buy_rank"] = rank
+        if rank > max_buys:
+            s["signal"] = HOLD
+            s["buy_candidate"] = True
+            s["reasons"] = [f"符合买入条件，综合评分排名第 {rank}（每日最多推荐 {max_buys} 只）"] + s["reasons"]

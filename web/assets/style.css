@@ -84,6 +84,7 @@ tbody tr.active { background: var(--row-hover); outline: 1px solid var(--accent)
 .sig.BUY { color: var(--buy); background: var(--buy-bg); }
 .sig.SELL { color: var(--sell); background: var(--sell-bg); }
 .sig.HOLD { color: var(--hold); background: var(--hold-bg); }
+.sig.CAND { color: var(--buy); background: transparent; box-shadow: inset 0 0 0 1px var(--buy); font-weight: 500; }
 .up { color: var(--buy); }   /* 涨红跌绿 */
 .down { color: var(--sell); }
 .dim { color: var(--muted); }

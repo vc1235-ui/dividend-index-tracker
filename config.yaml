@@ -31,6 +31,7 @@ rules:
     min_yield: 0.05              # 股息率(TTM) ≥ 5%
     min_yield_percentile: 70     # 股息率处于近 N 年 ≥70% 分位
     max_pe_percentile: 50        # PE(TTM) 处于近 N 年 ≤50% 分位
+    max_daily: 5                 # 每天最多推荐买入几只：同时满足条件时按综合评分取前 N 只，其余标为“买入候选”
 
   # 卖出：任一条件满足即触发
   sell:

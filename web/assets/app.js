@@ -11,6 +11,10 @@
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const pct = (v, d = 2) => (v == null ? "—" : (v * 100).toFixed(d) + "%");
   const num = (v, d = 2) => (v == null ? "—" : Number(v).toFixed(d));
+  // 信号徽标：超出每日名额的买入候选单独标出
+  const sigBadge = (s) => s.buy_candidate
+    ? `<span class="sig CAND" title="符合买入条件，超出每日推荐名额">买入候选 #${s.buy_rank}</span>`
+    : `<span class="sig ${s.signal}">${LABEL[s.signal]}</span>`;
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
   function quantile(arr, q) {
@@ -96,6 +100,7 @@
     renderKpis();
     renderRules();
     renderLog();
+    renderIndustryOptions();
     bindFilters();
     renderTable();
     renderScatter();
@@ -111,6 +116,7 @@
     const items = [
       ["跟踪个股", st.length, ""],
       ["买入信号", cnt("BUY"), "buy"],
+      ["买入候选", st.filter((x) => x.buy_candidate).length, ""],
       ["卖出信号", cnt("SELL"), "sell"],
       ["通过质量筛选", st.filter((x) => x.quality).length, ""],
       ["股息率中位数", pct(quantile(yields, 0.5)), ""],
@@ -119,22 +125,32 @@
   }
 
   // ---------- 表格 ----------
+  // 行业下拉框：按成分股数量从多到少排列
+  function renderIndustryOptions() {
+    const counts = {};
+    state.summary.stocks.forEach((s) => { const k = s.industry || "未知"; counts[k] = (counts[k] || 0) + 1; });
+    $("#fIndustry").innerHTML = `<option value="">全部行业</option>` + Object.entries(counts)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh"))
+      .map(([k, n]) => `<option value="${esc(k)}">${esc(k)}（${n}）</option>`).join("");
+  }
+
   function bindFilters() {
-    ["#fIndex", "#fSignal", "#fQuality", "#fSearch"].forEach((id) => $(id).addEventListener("input", () => { renderTable(); renderScatter(); }));
+    ["#fIndex", "#fIndustry", "#fSignal", "#fQuality", "#fSearch"].forEach((id) => $(id).addEventListener("input", () => { renderTable(); renderScatter(); }));
     document.querySelectorAll("#table th").forEach((th) => th.addEventListener("click", () => {
       const k = th.dataset.k;
-      if (state.sortKey === k) state.asc = !state.asc; else { state.sortKey = k; state.asc = k === "name" || k === "pe" || k === "pe_pct"; }
+      if (state.sortKey === k) state.asc = !state.asc; else { state.sortKey = k; state.asc = k === "name" || k === "industry" || k === "pe" || k === "pe_pct"; }
       renderTable();
     }));
   }
 
   function filtered() {
-    const idx = $("#fIndex").value, sig = $("#fSignal").value, q = $("#fSearch").value.trim(), quality = $("#fQuality").checked;
+    const idx = $("#fIndex").value, industry = $("#fIndustry").value, sig = $("#fSignal").value, q = $("#fSearch").value.trim(), quality = $("#fQuality").checked;
     return state.summary.stocks.filter((s) => {
       const codes = Object.keys(s.indices);
       if (idx === "both" && codes.length < 2) return false;
       if (idx && idx !== "both" && !codes.includes(idx)) return false;
-      if (sig && s.signal !== sig) return false;
+      if (industry && s.industry !== industry) return false;
+      if (sig === "CAND" ? !s.buy_candidate : sig && s.signal !== sig) return false;
       if (quality && !s.quality) return false;
       if (q && !s.code.includes(q) && !s.name.includes(q)) return false;
       return true;
@@ -161,7 +177,8 @@
     $("#table tbody").innerHTML = rows.map((s) => `
       <tr data-code="${s.code}" class="${state.current === s.code ? "active" : ""}">
         <td>${esc(s.name)}<span class="code">${s.code}</span>${Object.keys(s.indices).map((c) => `<span class="tag">${INDEX_SHORT[c] || c}</span>`).join("")}</td>
-        <td><span class="sig ${s.signal}">${LABEL[s.signal]}</span></td>
+        <td class="dim">${esc(s.industry || "—")}</td>
+        <td>${sigBadge(s)}</td>
         <td class="num">${num(s.score, 0)}</td>
         <td class="num">${num(s.price)}</td>
         <td class="num"><b>${pct(s.yield)}</b></td>
@@ -229,7 +246,7 @@
     history.replaceState(null, "", "#" + code);
     renderTable();
     $("#detail").hidden = false;
-    $("#dTitle").innerHTML = `${esc(s.name)} <span class="code">${s.code}</span> <span class="sig ${s.signal}">${LABEL[s.signal]}</span>`;
+    $("#dTitle").innerHTML = `${esc(s.name)} <span class="code">${s.code}</span> <span class="tag">${esc(s.industry || "—")}</span> ${sigBadge(s)}`;
     const since = s.since ? `<span>信号自 ${s.since}</span>` : "";
     const parts = s.score_parts ? `<span>评分 ${num(s.score, 0)} = 股息率 ${s.score_parts.yield} + 稳定性 ${s.score_parts.stability} + 支付率 ${s.score_parts.payout} + 估值 ${s.score_parts.valuation} + 增长 ${s.score_parts.growth}</span>` : "";
     $("#dReasons").innerHTML = s.reasons.map((r) => `<span>${esc(r)}</span>`).join("") + since + parts;
@@ -344,7 +361,7 @@
         <li>最近完整年度股利支付率 ≤ ${(r.quality.max_payout_ratio * 100).toFixed(0)}%</li>
         <li>综合评分 ≥ ${r.quality.min_score}（股息率 30 + 分红稳定性 20 + 支付率 15 + 估值分位 20 + 分红增长 15）</li>
       </ul>
-      <p><b class="up">买入</b>：通过质量筛选，且股息率 ≥ ${(r.buy.min_yield * 100).toFixed(1)}%、股息率处于近 ${n} 年 ≥ ${r.buy.min_yield_percentile}% 分位、PE 分位 ≤ ${r.buy.max_pe_percentile}%</p>
+      <p><b class="up">买入</b>：通过质量筛选，且股息率 ≥ ${(r.buy.min_yield * 100).toFixed(1)}%、股息率处于近 ${n} 年 ≥ ${r.buy.min_yield_percentile}% 分位、PE 分位 ≤ ${r.buy.max_pe_percentile}%。每天最多推荐 ${r.buy.max_daily ?? 5} 只（按综合评分取前 ${r.buy.max_daily ?? 5} 名），其余符合条件的标为“买入候选”，不发提醒</p>
       <p><b class="down">卖出</b>（任一）：股息率 ≤ ${(r.sell.max_yield * 100).toFixed(1)}%；股息率处于近 ${n} 年 ≤ ${r.sell.max_yield_percentile}% 分位；PE 为负；年度分红较上年削减超过 ${((1 - r.sell.dividend_cut_ratio) * 100).toFixed(0)}%；被调出指数</p>
       <p class="dim">阈值可在仓库的 config.yaml 中修改。</p>`;
   }

@@ -283,3 +283,39 @@ def test_eastmoney_incremental_parsing(monkeypatch):
     monkeypatch.setattr(requests, "get", lambda url, params, timeout: Resp({"result": None, "message": "参数错误"}))
     with pytest.raises(ValueError):
         p.valuation_since(["600000"], pd.Timestamp("2026-10-26"))
+
+
+def test_limit_buys_keeps_top_scores():
+    stocks = [{"code": str(i), "signal": signals.BUY, "score": s, "yield": y, "reasons": ["r"]}
+              for i, (s, y) in enumerate([(70, 0.05), (90, 0.06), (80, 0.07), (80, 0.08), (60, 0.09), (85, 0.05), (75, 0.06)])]
+    stocks.append({"code": "x", "signal": signals.SELL, "score": 99, "yield": 0.01, "reasons": ["s"]})
+    signals.limit_buys(stocks, 5)
+    buys = [s["code"] for s in stocks if s["signal"] == signals.BUY]
+    assert sorted(buys) == ["1", "2", "3", "5", "6"]  # 90, 85, 80(股息率高), 80, 75
+    ranks = {s["code"]: s["buy_rank"] for s in stocks if "buy_rank" in s}
+    assert ranks == {"1": 1, "5": 2, "3": 3, "2": 4, "6": 5, "0": 6, "4": 7}
+    cut = {s["code"]: s for s in stocks if s.get("buy_candidate")}
+    assert set(cut) == {"0", "4"} and all(s["signal"] == signals.HOLD for s in cut.values())
+    assert cut["0"]["reasons"][0].startswith("符合买入条件，综合评分排名第 6")
+    assert stocks[-1]["signal"] == signals.SELL and "buy_rank" not in stocks[-1]
+
+
+def test_industry_cached_and_buy_cap_in_pipeline(tmp_path):
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text("utf-8"))
+    cfg["rules"]["buy"].update(max_daily=1, min_yield=0.0, min_yield_percentile=0, max_pe_percentile=100)
+    cfg["rules"]["sell"].update(max_yield=-1, max_yield_percentile=-1)
+    cfg["rules"]["quality"]["min_score"] = 0
+
+    class P(DemoProvider):
+        calls = 0
+
+        def industry(self, code):
+            P.calls += 1
+            return super().industry(code)
+
+    res = main.run(P(n=12, end="2026-10-23"), cfg, tmp_path / "w", tmp_path / "s", send=False, demo=True)
+    assert sum(s["signal"] == "BUY" for s in res["stocks"]) == 1
+    assert all(s["industry"] and s["industry"] != "未知" for s in res["stocks"])
+    first = P.calls
+    main.run(P(n=12, end="2026-10-23"), cfg, tmp_path / "w", tmp_path / "s", send=False, demo=True)
+    assert first == 12 and P.calls == 12  # 第二次运行直接用缓存

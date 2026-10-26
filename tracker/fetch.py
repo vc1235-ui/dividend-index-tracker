@@ -6,6 +6,7 @@
 - valuation(code)          -> date(datetime64), close, pe, pb, mcap   （不复权收盘价，完整历史）
 - valuation_since(codes, since) -> {code: 同上}                         （可选：批量增量，只含 since 之后）
 - dividends(code)          -> report_date, ex_date, dps, eps, progress （dps 为每股税前现金分红，元）
+- industry(code)           -> 所属行业（东方财富行业分类）
 """
 
 from __future__ import annotations
@@ -132,6 +133,13 @@ class AkshareProvider:
         )
         return {c: g.drop(columns="code").sort_values("date").reset_index(drop=True) for c, g in out.groupby("code")}
 
+    def industry(self, code: str) -> str:
+        df = _retry(self.ak.stock_individual_info_em, symbol=code, timeout=15)
+        value = df.loc[df["item"] == "行业", "value"]
+        if value.empty or not str(value.iloc[0]).strip() or str(value.iloc[0]) == "-":
+            raise ValueError("无行业数据")
+        return str(value.iloc[0]).strip()
+
     def dividends(self, code: str) -> pd.DataFrame:
         try:
             df = _retry(self.ak.stock_fhps_detail_em, symbol=code)
@@ -214,6 +222,11 @@ class DemoProvider:
             if not df.empty:
                 out[code] = df
         return out
+
+    INDUSTRIES = ["银行", "煤炭行业", "公用事业", "交运设备", "钢铁行业", "化学制品", "家电行业"]
+
+    def industry(self, code: str) -> str:
+        return self.INDUSTRIES[int(code) % len(self.INDUSTRIES)]
 
     def dividends(self, code: str) -> pd.DataFrame:
         rng = self._rng(code)
