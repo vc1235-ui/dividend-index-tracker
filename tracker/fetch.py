@@ -6,7 +6,7 @@
 - valuation(code)          -> date(datetime64), close, pe, pb, mcap   （不复权收盘价，完整历史）
 - valuation_since(codes, since) -> {code: 同上}                         （可选：批量增量，只含 since 之后）
 - dividends(code)          -> report_date, ex_date, dps, eps, progress （dps 为每股税前现金分红，元）
-- industry(code)           -> 所属行业（东方财富行业分类）
+- industries(codes)        -> {code: 所属行业}（东方财富行业分类，批量）
 """
 
 from __future__ import annotations
@@ -29,8 +29,9 @@ def _retry(fn, *args, tries: int = 3, wait: float = 3.0, **kwargs):
             return fn(*args, **kwargs)
         except Exception as e:  # 数据源偶发失败，重试
             last = e
-            log.warning("%s %s 第 %d/%d 次失败: %s", fn.__name__, kwargs or args, i + 1, tries, e)
-            time.sleep(wait * (i + 1))
+            log.warning("%s %s 第 %d/%d 次失败: %s", getattr(fn, "__name__", fn), kwargs or args, i + 1, tries, e)
+            if i + 1 < tries:  # 最后一次失败后不再等待
+                time.sleep(wait * (i + 1))
     raise last
 
 
@@ -87,11 +88,9 @@ class AkshareProvider:
             }
         )
 
-    def valuation_since(self, codes: list[str], since: pd.Timestamp) -> dict[str, pd.DataFrame]:
-        """一次批量请求多只股票 since 之后（不含）的估值数据，用于增量更新。
-
-        与 stock_value_em 是同一个东方财富接口，只是按股票列表和日期过滤，几天的数据只需一两页。
-        """
+    @staticmethod
+    def _valuation_rows(codes: list[str], since: pd.Timestamp) -> pd.DataFrame:
+        """东方财富估值分析报表（与 stock_value_em 同一接口）中，多只股票 since 之后（不含）的全部字段。"""
         import requests
 
         codes_expr = ",".join(f'"{c}"' for c in codes)
@@ -118,9 +117,13 @@ class AkshareProvider:
             rows.extend(result.get("data") or [])
             pages = int(result.get("pages") or 1)
             page += 1
-        if not rows:
+        return pd.DataFrame(rows)
+
+    def valuation_since(self, codes: list[str], since: pd.Timestamp) -> dict[str, pd.DataFrame]:
+        """一次批量请求多只股票 since 之后（不含）的估值数据，用于增量更新。"""
+        df = self._valuation_rows(codes, since)
+        if df.empty:
             return {}
-        df = pd.DataFrame(rows)
         out = pd.DataFrame(
             {
                 "code": df["SECURITY_CODE"].astype(str).str.zfill(6),
@@ -133,12 +136,23 @@ class AkshareProvider:
         )
         return {c: g.drop(columns="code").sort_values("date").reset_index(drop=True) for c, g in out.groupby("code")}
 
-    def industry(self, code: str) -> str:
-        df = _retry(self.ak.stock_individual_info_em, symbol=code, timeout=15)
-        value = df.loc[df["item"] == "行业", "value"]
-        if value.empty or not str(value.iloc[0]).strip() or str(value.iloc[0]) == "-":
-            raise ValueError("无行业数据")
-        return str(value.iloc[0]).strip()
+    def industries(self, codes: list[str]) -> dict[str, str]:
+        """批量获取所属行业（东方财富行业分类），取自估值分析报表近 20 天的记录，一两次请求即可。
+
+        个股资料接口（push2）在境外服务器上返回非 JSON，所以不用它。
+        """
+        df = self._valuation_rows(codes, pd.Timestamp.today().normalize() - pd.Timedelta(days=20))
+        if df.empty:
+            raise ValueError("近 20 天无估值记录")
+        field = next((f for f in ("BOARD_NAME", "INDUSTRY_NAME", "INDUSTRY") if f in df.columns), None)
+        if field is None:
+            raise ValueError(f"估值报表中没有行业字段，可用字段: {', '.join(map(str, df.columns))}")
+        df = df.sort_values("TRADE_DATE")
+        return {
+            str(c).zfill(6): str(v).strip()
+            for c, v in zip(df["SECURITY_CODE"], df[field])
+            if v is not None and str(v).strip() not in ("", "-", "nan")
+        }
 
     def dividends(self, code: str) -> pd.DataFrame:
         try:
@@ -225,8 +239,8 @@ class DemoProvider:
 
     INDUSTRIES = ["银行", "煤炭行业", "公用事业", "交运设备", "钢铁行业", "化学制品", "家电行业"]
 
-    def industry(self, code: str) -> str:
-        return self.INDUSTRIES[int(code) % len(self.INDUSTRIES)]
+    def industries(self, codes: list[str]) -> dict[str, str]:
+        return {c: self.INDUSTRIES[int(c) % len(self.INDUSTRIES)] for c in codes}
 
     def dividends(self, code: str) -> pd.DataFrame:
         rng = self._rng(code)

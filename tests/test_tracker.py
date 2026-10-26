@@ -309,9 +309,9 @@ def test_industry_cached_and_buy_cap_in_pipeline(tmp_path):
     class P(DemoProvider):
         calls = 0
 
-        def industry(self, code):
-            P.calls += 1
-            return super().industry(code)
+        def industries(self, codes):
+            P.calls += len(codes)
+            return super().industries(codes)
 
     res = main.run(P(n=12, end="2026-10-23"), cfg, tmp_path / "w", tmp_path / "s", send=False, demo=True)
     assert sum(s["signal"] == "BUY" for s in res["stocks"]) == 1
@@ -319,3 +319,48 @@ def test_industry_cached_and_buy_cap_in_pipeline(tmp_path):
     first = P.calls
     main.run(P(n=12, end="2026-10-23"), cfg, tmp_path / "w", tmp_path / "s", send=False, demo=True)
     assert first == 12 and P.calls == 12  # 第二次运行直接用缓存
+
+
+def test_eastmoney_industries_batch(monkeypatch):
+    import requests
+
+    from tracker.fetch import AkshareProvider
+
+    class Resp:
+        def __init__(self, js):
+            self.js = js
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.js
+
+    data = [
+        {"SECURITY_CODE": "600000", "TRADE_DATE": "2026-10-23 00:00:00", "BOARD_NAME": "银行"},
+        {"SECURITY_CODE": "601088", "TRADE_DATE": "2026-10-23 00:00:00", "BOARD_NAME": "-"},
+        {"SECURITY_CODE": "601088", "TRADE_DATE": "2026-10-26 00:00:00", "BOARD_NAME": "煤炭行业"},
+    ]
+    monkeypatch.setattr(requests, "get", lambda url, params, timeout: Resp({"result": {"pages": 1, "data": data}}))
+    p = AkshareProvider.__new__(AkshareProvider)
+    assert p.industries(["600000", "601088"]) == {"600000": "银行", "601088": "煤炭行业"}
+
+    no_field = [{"SECURITY_CODE": "600000", "TRADE_DATE": "2026-10-23", "CLOSE_PRICE": 1}]
+    monkeypatch.setattr(requests, "get", lambda url, params, timeout: Resp({"result": {"pages": 1, "data": no_field}}))
+    with pytest.raises(ValueError, match="可用字段: SECURITY_CODE, TRADE_DATE, CLOSE_PRICE"):
+        p.industries(["600000"])
+
+
+def test_industry_failure_is_fast_and_retried_next_run(tmp_path):
+    import time
+
+    class Broken(DemoProvider):
+        def industries(self, codes):
+            raise ConnectionError("blocked")
+
+    t0 = time.monotonic()
+    got = main.load_industries(Broken(n=5), ["600000", "000042"], tmp_path / "industries.json")
+    assert got == {"600000": "未知", "000042": "未知"}
+    assert time.monotonic() - t0 < 3  # 只重试一次、等待 2 秒
+    assert not (tmp_path / "industries.json").exists()  # 失败不写缓存，下次运行会再试
+    assert main.load_industries(DemoProvider(n=5), ["600000"], tmp_path / "industries.json") == {"600000": "公用事业"}

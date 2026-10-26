@@ -139,23 +139,22 @@ def incremental_valuations(provider, codes: list[str], cache: HistoryCache, cfg:
     return merged
 
 
-def load_industries(provider, codes: list[str], path: Path, workers: int, max_age_days: int = 90) -> dict[str, str]:
-    """所属行业：缓存在 state/industries.json 中，只为缺失或超过 max_age_days 天的股票请求数据源。"""
+def load_industries(provider, codes: list[str], path: Path, max_age_days: int = 90) -> dict[str, str]:
+    """所属行业：缓存在 state/industries.json 中，只为缺失或超过 max_age_days 天的股票批量请求一次。"""
     cache = load_json(path, {})
     today = date.today()
     todo = [c for c in codes
             if c not in cache or (today - date.fromisoformat(cache[c]["updated"])).days >= max_age_days]
-    if todo and hasattr(provider, "industry"):
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(provider.industry, c): c for c in todo}
-            for fut in as_completed(futures):
-                code = futures[fut]
-                try:
-                    cache[code] = {"industry": fut.result(), "updated": today.isoformat()}
-                except Exception as e:  # 获取失败不影响主流程，下次运行再试
-                    log.warning("%s 行业获取失败: %s", code, e)
-        log.info("行业数据：更新 %d 只，缓存 %d 只", len(todo), len(cache))
-        dump_json(path, cache)
+    if todo and hasattr(provider, "industries"):
+        try:  # 行业只是辅助信息：快速失败，不拖慢主流程，下次运行再试
+            got = _retry(provider.industries, todo, tries=2, wait=2)
+            for code, name in got.items():
+                if code in todo:
+                    cache[code] = {"industry": name, "updated": today.isoformat()}
+            log.info("行业数据：请求 %d 只，取得 %d 只，缓存共 %d 只", len(todo), len(got), len(cache))
+            dump_json(path, cache)
+        except Exception as e:
+            log.warning("行业数据获取失败，本次显示为“未知”: %s", e)
     return {c: cache[c]["industry"] if c in cache else "未知" for c in codes}
 
 
@@ -171,7 +170,7 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
     log.info("共 %d 只成分股（去重后）", len(members))
 
     workers = 1 if demo else max(1, int(cfg.get("workers", 4)))
-    industries = load_industries(provider, sorted(members), state_dir / "industries.json", workers)
+    industries = load_industries(provider, sorted(members), state_dir / "industries.json")
     incremental = incremental_valuations(provider, sorted(members), cache, cfg) if cache else {}
 
     def fetch(code: str) -> tuple[dict, dict]:
