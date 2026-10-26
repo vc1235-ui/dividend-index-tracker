@@ -3,7 +3,8 @@
 所有 provider 返回统一格式的 DataFrame：
 
 - constituents(index_code) -> code, name, weight
-- valuation(code)          -> date(datetime64), close, pe, pb, mcap   （不复权收盘价）
+- valuation(code)          -> date(datetime64), close, pe, pb, mcap   （不复权收盘价，完整历史）
+- valuation_since(codes, since) -> {code: 同上}                         （可选：批量增量，只含 since 之后）
 - dividends(code)          -> report_date, ex_date, dps, eps, progress （dps 为每股税前现金分红，元）
 """
 
@@ -16,6 +17,8 @@ import numpy as np
 import pandas as pd
 
 log = logging.getLogger(__name__)
+
+EASTMONEY_DATACENTER = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 
 
 def _retry(fn, *args, tries: int = 3, wait: float = 3.0, **kwargs):
@@ -82,6 +85,52 @@ class AkshareProvider:
                 "mcap": np.nan,
             }
         )
+
+    def valuation_since(self, codes: list[str], since: pd.Timestamp) -> dict[str, pd.DataFrame]:
+        """一次批量请求多只股票 since 之后（不含）的估值数据，用于增量更新。
+
+        与 stock_value_em 是同一个东方财富接口，只是按股票列表和日期过滤，几天的数据只需一两页。
+        """
+        import requests
+
+        codes_expr = ",".join(f'"{c}"' for c in codes)
+        params = {
+            "sortColumns": "TRADE_DATE",
+            "sortTypes": "1",
+            "pageSize": "500",
+            "reportName": "RPT_VALUEANALYSIS_DET",
+            "columns": "ALL",
+            "source": "WEB",
+            "client": "WEB",
+            "filter": f"(SECURITY_CODE in ({codes_expr}))(TRADE_DATE>'{since:%Y-%m-%d}')",
+        }
+        rows, page, pages = [], 1, 1
+        while page <= pages:
+            r = requests.get(EASTMONEY_DATACENTER, params={**params, "pageNumber": str(page)}, timeout=30)
+            r.raise_for_status()
+            js = r.json()
+            result = js.get("result")
+            if not result:
+                if "空" in str(js.get("message", "")):  # 没有新数据（例如节假日）
+                    break
+                raise ValueError(f"东方财富接口返回异常: {js.get('message')}")
+            rows.extend(result.get("data") or [])
+            pages = int(result.get("pages") or 1)
+            page += 1
+        if not rows:
+            return {}
+        df = pd.DataFrame(rows)
+        out = pd.DataFrame(
+            {
+                "code": df["SECURITY_CODE"].astype(str).str.zfill(6),
+                "date": pd.to_datetime(df["TRADE_DATE"]).dt.normalize(),
+                "close": pd.to_numeric(df["CLOSE_PRICE"], errors="coerce"),
+                "pe": pd.to_numeric(df["PE_TTM"], errors="coerce"),
+                "pb": pd.to_numeric(df["PB_MRQ"], errors="coerce"),
+                "mcap": pd.to_numeric(df["TOTAL_MARKET_CAP"], errors="coerce"),
+            }
+        )
+        return {c: g.drop(columns="code").sort_values("date").reset_index(drop=True) for c, g in out.groupby("code")}
 
     def dividends(self, code: str) -> pd.DataFrame:
         try:
@@ -157,10 +206,19 @@ class DemoProvider:
         pb = pe * rng.uniform(0.08, 0.15)
         return pd.DataFrame({"date": dates, "close": close.round(2), "pe": pe, "pb": pb, "mcap": close * rng.uniform(5e9, 5e10)})
 
+    def valuation_since(self, codes: list[str], since: pd.Timestamp) -> dict[str, pd.DataFrame]:
+        out = {}
+        for code in codes:
+            df = self.valuation(code)
+            df = df[df["date"] > since].reset_index(drop=True)
+            if not df.empty:
+                out[code] = df
+        return out
+
     def dividends(self, code: str) -> pd.DataFrame:
         rng = self._rng(code)
         rng.random(252 * 6 * 3)  # 与 valuation 错开随机序列
-        val = self.valuation(code)
+        val = DemoProvider.valuation(self, code)  # 不经过子类重载（测试中会统计请求次数）
         price0 = float(val["close"].iloc[0])
         base = price0 * rng.uniform(0.03, 0.07)
         growth = rng.normal(0.03, 0.06)

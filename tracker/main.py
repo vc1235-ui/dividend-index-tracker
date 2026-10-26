@@ -14,6 +14,7 @@ import logging
 import os
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -21,6 +22,8 @@ import pandas as pd
 import yaml
 
 from . import indicators, notify, signals
+from .cache import HistoryCache, merge
+from .fetch import _retry
 
 ROOT = Path(__file__).resolve().parent.parent
 log = logging.getLogger("tracker")
@@ -104,7 +107,40 @@ def diff_signals(stocks: list[dict], members: set[str], state: dict, data_date: 
     return alerts
 
 
-def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: bool = False) -> dict:
+def incremental_valuations(provider, codes: list[str], cache: HistoryCache, cfg: dict) -> dict[str, pd.DataFrame]:
+    """对有新鲜缓存的股票，用一次批量请求补上缓存之后的新数据。
+
+    缓存超过 full_refresh_days 天未全量刷新、或最新日期太旧的股票不走增量，返回值中不包含它们。
+    用其中一只股票的全量数据核对增量结果，不一致则整体放弃增量（调用方会改为全量拉取）。
+    """
+    if not hasattr(provider, "valuation_since"):
+        return {}
+    today = date.today()
+    full_days = int(cfg.get("full_refresh_days", 7))
+    cached = {}
+    for code in codes:
+        df, full_date = cache.load(code)
+        if df is not None and (today - full_date).days < full_days and (today - df["date"].max().date()).days < 30:
+            cached[code] = df
+    if not cached:
+        return {}
+    since = min(df["date"].max() for df in cached.values())
+    try:
+        new = _retry(provider.valuation_since, sorted(cached), since)
+        merged = {code: merge(df, new.get(code)) for code, df in cached.items()}
+        probe = sorted(cached)[0]
+        full = provider.valuation(probe)
+        if full["date"].max() > merged[probe]["date"].max():
+            raise ValueError(f"{probe} 增量数据缺少 {full['date'].max():%Y-%m-%d}")
+    except Exception as e:
+        log.warning("增量更新失败，改为全量拉取: %s", e)
+        return {}
+    log.info("增量更新 %d 只股票（自 %s 起，%d 行新数据）", len(merged), f"{since:%Y-%m-%d}", sum(len(v) for v in new.values()))
+    return merged
+
+
+def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: bool = False,
+        cache: HistoryCache | None = None) -> dict:
     rules = cfg["rules"]
     data_dir = web_dir / "data"
     if (data_dir / "stocks").exists():
@@ -114,16 +150,50 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
     index_names = {i["code"]: i["name"] for i in cfg["indices"]}
     log.info("共 %d 只成分股（去重后）", len(members))
 
-    stocks, failed = [], []
-    for n, (code, info) in enumerate(sorted(members.items()), 1):
-        try:
+    incremental = incremental_valuations(provider, sorted(members), cache, cfg) if cache else {}
+
+    def fetch(code: str) -> tuple[dict, dict]:
+        if code in incremental:
+            val = incremental[code]
+        else:
             val = provider.valuation(code)
-            div = provider.dividends(code)
-            m, series = indicators.compute(val, div, cfg["history_years"], rules["sell"]["dividend_cut_ratio"])
+        if cache:
+            cache.save(code, val, full=code not in incremental)
+        div = provider.dividends(code)
+        if not demo:
+            time.sleep(cfg.get("request_interval", 0.5))
+        return indicators.compute(val, div, cfg["history_years"], rules["sell"]["dividend_cut_ratio"])
+
+    # 耗时几乎全在网络请求上，多线程并发拉取；并发失败的再逐只串行补拉一次
+    results: dict[str, tuple[dict, dict]] = {}
+    errors: dict[str, Exception] = {}
+    workers = 1 if demo else max(1, int(cfg.get("workers", 4)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(fetch, code): code for code in sorted(members)}
+        for n, fut in enumerate(as_completed(futures), 1):
+            code = futures[fut]
+            try:
+                results[code] = fut.result()
+                log.info("[%d/%d] %s %s 完成", n, len(members), code, members[code]["name"])
+            except Exception as e:
+                errors[code] = e
+                log.warning("[%d/%d] %s %s 失败，稍后重试: %s", n, len(members), code, members[code]["name"], e)
+    for code in sorted(errors):
+        try:
+            results[code] = fetch(code)
+            log.info("%s %s 重试成功", code, members[code]["name"])
         except Exception as e:
-            log.error("[%d/%d] %s %s 处理失败: %s", n, len(members), code, info["name"], e)
+            log.error("%s %s 处理失败: %s", code, members[code]["name"], e)
+
+    if cache:
+        cache.flush()
+
+    stocks, failed = [], []
+    for code, info in sorted(members.items()):
+        if code not in results:
             failed.append(code)
             continue
+        m, series = results[code]
         sc = signals.score(m)
         m["score"] = sc["total"]
         sig, reasons, quality = signals.evaluate(m, rules)
@@ -131,9 +201,7 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
                  "score_parts": sc["parts"], "quality": quality, "signal": sig, "reasons": reasons}
         stocks.append(stock)
         dump_json(data_dir / "stocks" / f"{code}.json", {**series, "code": code, "name": info["name"]})
-        log.info("[%d/%d] %s %s 股息率=%s 评分=%s 信号=%s", n, len(members), code, info["name"], m["yield"], m["score"], sig)
-        if not demo:
-            time.sleep(cfg.get("request_interval", 0.5))
+        log.info("%s %s 股息率=%s 评分=%s 信号=%s", code, info["name"], m["yield"], m["score"], sig)
 
     if not stocks:
         raise RuntimeError("全部股票处理失败，请检查数据源")
@@ -189,6 +257,7 @@ def main() -> None:
     ap.add_argument("--web", default=str(ROOT / "web"))
     ap.add_argument("--state", default=str(ROOT / "state"))
     ap.add_argument("--demo", action="store_true", help="使用离线演示数据")
+    ap.add_argument("--cache", default=str(ROOT / ".cache" / "history"), help="估值历史缓存目录（增量更新用）")
     ap.add_argument("--no-notify", action="store_true", help="不发送提醒")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -205,7 +274,8 @@ def main() -> None:
     state_dir = Path(args.state)
     if args.demo:  # 演示模式不污染真实状态
         state_dir = Path(args.web) / ".demo-state"
-    run(provider, cfg, Path(args.web), state_dir, send=not args.no_notify and not args.demo, demo=args.demo)
+    cache = None if args.demo else HistoryCache(Path(args.cache), cfg["history_years"])
+    run(provider, cfg, Path(args.web), state_dir, send=not args.no_notify and not args.demo, demo=args.demo, cache=cache)
 
 
 if __name__ == "__main__":

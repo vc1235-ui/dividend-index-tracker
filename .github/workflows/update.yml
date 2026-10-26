@@ -60,6 +60,14 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
 
+      # 估值历史缓存：每次运行恢复最近一次的缓存，结束时保存新的，实现增量更新
+      - name: 恢复估值历史缓存
+        uses: actions/cache@v4
+        with:
+          path: .cache/history
+          key: history-${{ github.run_id }}
+          restore-keys: history-
+
       - name: 拉取数据、计算信号并发送提醒
         env:
           TZ: Asia/Shanghai

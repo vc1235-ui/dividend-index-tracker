@@ -124,3 +124,162 @@ def test_demo_pipeline(tmp_path):
     assert (tmp_path / "web" / "data" / "summary.json").exists()
     assert len(list((tmp_path / "web" / "data" / "stocks").glob("*.json"))) == 12
     assert {s["signal"] for s in res["stocks"]} <= {"BUY", "SELL", "HOLD"}
+
+
+class FlakyDemoProvider(DemoProvider):
+    """每次请求固定耗时，且指定股票第一次请求失败，用来测试并发与补拉。"""
+
+    def __init__(self, delay, fail_once=(), **kw):
+        super().__init__(**kw)
+        self.delay, self.fail_once = delay, set(fail_once)
+
+    def valuation(self, code):
+        import time
+
+        time.sleep(self.delay)
+        if code in self.fail_once:
+            self.fail_once.discard(code)
+            raise ConnectionError("模拟网络错误")
+        return super().valuation(code)
+
+
+def test_concurrent_fetch_with_retry(tmp_path):
+    import time
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text("utf-8"))
+    cfg["request_interval"] = 0
+
+    def timed_run(workers, name):
+        t0 = time.monotonic()
+        provider = FlakyDemoProvider(0.1, fail_once={"600000", "000042"}, n=12, end="2026-10-23")
+        res = main.run(provider, {**cfg, "workers": workers}, tmp_path / name, tmp_path / f"{name}-state", send=False)
+        return res, time.monotonic() - t0
+
+    serial, t_serial = timed_run(1, "serial")
+    parallel, t_parallel = timed_run(4, "parallel")
+
+    assert t_parallel < t_serial * 0.5
+    assert len(serial["stocks"]) == len(parallel["stocks"]) == 12  # 两只首次失败的股票都已补拉回来
+    assert [(s["code"], s["signal"], s["score"]) for s in parallel["stocks"]] == [
+        (s["code"], s["signal"], s["score"]) for s in serial["stocks"]
+    ]
+
+
+class CountingProvider(DemoProvider):
+    """可设定“今天”的演示数据源，并统计全量 / 增量请求次数。"""
+
+    def __init__(self, cutoff, broken_incremental=False, **kw):
+        super().__init__(**kw)
+        self.cutoff, self.broken = cutoff, broken_incremental
+        self.full_calls, self.incremental_calls = 0, 0
+
+    def _upto(self, code):
+        df = DemoProvider.valuation(self, code)
+        return df[df["date"] <= self.cutoff].reset_index(drop=True)
+
+    def valuation(self, code):
+        self.full_calls += 1
+        return self._upto(code)
+
+    def valuation_since(self, codes, since):
+        self.incremental_calls += 1
+        if self.broken:  # 模拟增量接口静默返回空结果
+            return {}
+        return {c: df[df["date"] > since].reset_index(drop=True) for c in codes if not (df := self._upto(c)).empty}
+
+
+def _snapshot(res):
+    return [(s["code"], s["date"], s["price"], s["yield"], s["pe_pct"], s["signal"]) for s in res["stocks"]]
+
+
+def test_incremental_update(tmp_path):
+    from tracker.cache import HistoryCache
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text("utf-8"))
+    cfg.update(request_interval=0, workers=4)
+    days = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=3)
+    cache = HistoryCache(tmp_path / "cache", cfg["history_years"])
+
+    # 第 1 天：没有缓存，全量拉取并写入缓存
+    p1 = CountingProvider(days[0], n=10)
+    main.run(p1, cfg, tmp_path / "w1", tmp_path / "s1", send=False, cache=cache)
+    assert p1.full_calls == 10 and p1.incremental_calls == 0
+
+    # 第 3 天：缓存差 2 个交易日，一次批量增量 + 1 只核对用的全量
+    p3 = CountingProvider(days[2], n=10)
+    inc = main.run(p3, cfg, tmp_path / "w3", tmp_path / "s3", send=False,
+                   cache=HistoryCache(tmp_path / "cache", cfg["history_years"]))
+    assert p3.incremental_calls == 1 and p3.full_calls == 1
+
+    # 与不用缓存、直接全量拉取的结果完全一致
+    full = main.run(CountingProvider(days[2], n=10), cfg, tmp_path / "wf", tmp_path / "sf", send=False)
+    assert _snapshot(inc) == _snapshot(full)
+    assert inc["data_date"] == days[2].strftime("%Y-%m-%d")
+
+
+def test_incremental_falls_back_when_incomplete(tmp_path):
+    from tracker.cache import HistoryCache
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text("utf-8"))
+    cfg.update(request_interval=0, workers=4)
+    days = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=2)
+    main.run(CountingProvider(days[0], n=8), cfg, tmp_path / "w1", tmp_path / "s1", send=False,
+             cache=HistoryCache(tmp_path / "cache", cfg["history_years"]))
+
+    broken = CountingProvider(days[1], broken_incremental=True, n=8)
+    res = main.run(broken, cfg, tmp_path / "w2", tmp_path / "s2", send=False,
+                   cache=HistoryCache(tmp_path / "cache", cfg["history_years"]))
+    assert broken.full_calls == 1 + 8  # 核对发现缺数据 → 全部改为全量
+    assert res["data_date"] == days[1].strftime("%Y-%m-%d")
+
+    # 超过全量刷新周期时不走增量
+    stale = CountingProvider(days[1], n=8)
+    main.run(stale, {**cfg, "full_refresh_days": 0}, tmp_path / "w3", tmp_path / "s3", send=False,
+             cache=HistoryCache(tmp_path / "cache", cfg["history_years"]))
+    assert stale.incremental_calls == 0 and stale.full_calls == 8
+
+
+def test_eastmoney_incremental_parsing(monkeypatch):
+    import requests
+
+    from tracker.fetch import AkshareProvider
+
+    def row(code, d, close):
+        return {"SECURITY_CODE": code, "TRADE_DATE": f"{d} 00:00:00", "CLOSE_PRICE": close, "PE_TTM": 6.1,
+                "PB_MRQ": 0.6, "TOTAL_MARKET_CAP": 1e11, "OTHER": "x"}
+
+    pages = {
+        "1": {"result": {"pages": 2, "data": [row("600000", "2026-10-23", 10.1), row("601088", "2026-10-23", 40.0)]}},
+        "2": {"result": {"pages": 2, "data": [row("600000", "2026-10-26", 10.3)]}},
+    }
+    seen = []
+
+    class Resp:
+        def __init__(self, js):
+            self.js = js
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.js
+
+    def fake_get(url, params, timeout):
+        seen.append(params)
+        return Resp(pages[params["pageNumber"]])
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    p = AkshareProvider.__new__(AkshareProvider)  # 不需要 akshare 本身
+    out = p.valuation_since(["600000", "601088"], pd.Timestamp("2026-10-22"))
+    assert seen[0]["filter"] == '(SECURITY_CODE in ("600000","601088"))(TRADE_DATE>\'2026-10-22\')'
+    assert list(out["600000"]["close"]) == [10.1, 10.3]
+    assert list(out["600000"].columns) == ["date", "close", "pe", "pb", "mcap"]
+    assert out["601088"]["date"].iloc[0] == pd.Timestamp("2026-10-23")
+
+    # 节假日没有新数据：接口返回 result 为空并提示“返回数据为空”
+    monkeypatch.setattr(requests, "get", lambda url, params, timeout: Resp({"result": None, "message": "返回数据为空"}))
+    assert p.valuation_since(["600000"], pd.Timestamp("2026-10-26")) == {}
+    # 其他错误要抛出，由调用方退回全量拉取
+    monkeypatch.setattr(requests, "get", lambda url, params, timeout: Resp({"result": None, "message": "参数错误"}))
+    with pytest.raises(ValueError):
+        p.valuation_since(["600000"], pd.Timestamp("2026-10-26"))

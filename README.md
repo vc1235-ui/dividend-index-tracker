@@ -92,6 +92,7 @@ python -m pytest -q                    # 运行测试
 ```
 config.yaml            规则与阈值
 tracker/fetch.py       数据获取（AKShare：中证指数官网成分股、东方财富估值与分红）
+tracker/cache.py       估值历史缓存：每天只批量拉增量，每 7 天全量刷新
 tracker/indicators.py  股息率、分位、连续分红、支付率、分红增速
 tracker/signals.py     综合评分与买卖规则
 tracker/notify.py      各推送渠道
