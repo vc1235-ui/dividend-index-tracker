@@ -1,0 +1,40 @@
+# 红利指数个股跟踪 —— 规则配置
+# 修改后推送到 main 分支，下一次运行即生效。比例均用小数表示（0.05 = 5%）。
+
+indices:
+  - code: "000015"
+    name: 上证红利
+  - code: "000922"
+    name: 中证红利
+
+# 计算股息率 / 估值历史分位所用的回看年数
+history_years: 5
+
+# 每只股票之间的请求间隔（秒），避免触发数据源限流
+request_interval: 0.6
+
+rules:
+  # “值得投资”的基本门槛（质量筛选）
+  quality:
+    min_consecutive_years: 3   # 最少连续分红年数
+    max_payout_ratio: 0.9      # 最近完整年度股利支付率上限，过高则分红难以持续
+    min_score: 60              # 综合评分下限（0-100）
+
+  # 买入：通过质量筛选，且股息率够高、处于历史高位（价格便宜）
+  buy:
+    min_yield: 0.05              # 股息率(TTM) ≥ 5%
+    min_yield_percentile: 70     # 股息率处于近 N 年 ≥70% 分位
+    max_pe_percentile: 50        # PE(TTM) 处于近 N 年 ≤50% 分位
+
+  # 卖出：任一条件满足即触发
+  sell:
+    max_yield: 0.03              # 股息率(TTM) ≤ 3%，性价比不足
+    max_yield_percentile: 15     # 股息率处于近 N 年 ≤15% 分位（价格偏贵）
+    dividend_cut_ratio: 0.7      # 最近年度每股分红 < 上一年度 × 0.7，视为大幅削减分红
+    # 另外：PE(TTM) ≤ 0（亏损）、被调出全部跟踪指数，也会触发卖出提醒
+
+notify:
+  on_signals: [BUY, SELL]   # 哪些信号变化需要提醒
+  cooldown_days: 20         # 同一只股票同一信号的最短重复提醒间隔（自然日）
+  github_issue: true        # 在本仓库创建 Issue 作为提醒（无需额外配置，GitHub 会发邮件/App 通知）
+  github_issue_mention: true  # Issue 中 @ 仓库所有者，确保收到通知

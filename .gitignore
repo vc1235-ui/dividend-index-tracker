@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+# 网页数据由 Actions 每次生成后直接部署到 GitHub Pages，不入库
+web/data/
+web/.demo-state/

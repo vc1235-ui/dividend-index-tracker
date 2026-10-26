@@ -1,0 +1,85 @@
+# 红利指数个股跟踪
+
+跟踪 **上证红利指数（000015）** 与 **中证红利指数（000922）** 的全部成分股，按股息率、估值历史分位和分红质量筛选值得投资的个股，以网页图表展示；当个股触发**买入**或**卖出**信号时自动推送提醒。
+
+- 网页：<https://vc1235-ui.github.io/dividend-index-tracker/>（启用 GitHub Pages 后可访问，见下文）
+- 每个交易日北京时间 20:17 由 GitHub Actions 自动更新，无需服务器
+
+> ⚠️ 规则信号仅供学习研究，不构成投资建议。
+
+## 网页内容
+
+| 模块 | 说明 |
+| --- | --- |
+| 概览 | 跟踪个股数、买入/卖出信号数、通过质量筛选数、股息率中位数 |
+| 股息率 × 估值分位散点图 | 横轴股息率，纵轴股息率历史分位，气泡大小为市值，颜色为信号（红=买入，绿=卖出） |
+| 成分股列表 | 可按指数、信号、质量筛选、关键字过滤，任意列排序 |
+| 个股详情 | 股价 + 年线 + 股息率走势（标注除息日）、股息率与买卖线、PE 历史分位带、年度每股分红与支付率 |
+| 信号提醒记录 | 历次信号变化 |
+
+## 指标与规则
+
+- **股息率(TTM)** = 过去 365 天已除息的每股税前现金分红 ÷ 不复权收盘价
+- **股息率分位 / PE 分位 / PB 分位**：当前值在近 5 年日度数据中的百分位
+- **连续分红年数**：截至最近一个已公布年报分配方案的财年，连续现金分红的年数
+- **支付率** = 财年每股分红合计 ÷ 年报每股收益
+- **综合评分（0-100）** = 股息率 30 + 分红稳定性 20 + 支付率合理性 15 + 估值分位 20 + 分红增长 15
+
+| 信号 | 条件（默认值） |
+| --- | --- |
+| 质量筛选 | 连续分红 ≥ 3 年，PE > 0，支付率 ≤ 90%，评分 ≥ 60 |
+| 🔴 买入 | 通过质量筛选 且 股息率 ≥ 5% 且 股息率分位 ≥ 70% 且 PE 分位 ≤ 50% |
+| 🟢 卖出（任一） | 股息率 ≤ 3%；股息率分位 ≤ 15%；PE 为负；年度分红较上年削减 > 30%；被调出指数 |
+
+所有阈值都在 [`config.yaml`](config.yaml) 中，修改并推送后即生效。
+
+**提醒只在信号发生变化时发送**（例如由“持有/观望”变为“买入”），同一股票同一信号 20 天内不重复提醒；非交易日不会重复提醒。
+
+## 部署（一次性设置）
+
+1. **启用网页**：仓库 Settings → Pages → Build and deployment → Source 选择 **GitHub Actions**。
+2. **首次运行**：Actions → “更新数据并部署” → Run workflow。约 5–10 分钟后网页即可访问。
+3. **配置提醒**（可选，可多选）：Settings → Secrets and variables → Actions → New repository secret。
+
+| 渠道 | Secret |
+| --- | --- |
+| GitHub Issue（默认开启，无需配置） | — 信号会创建 Issue 并 @仓库所有者，GitHub 会发邮件 / App 推送 |
+| Server酱（微信） | `SERVERCHAN_SENDKEY` |
+| PushPlus（微信） | `PUSHPLUS_TOKEN` |
+| 企业微信群机器人 | `WECOM_WEBHOOK` |
+| 钉钉群机器人 | `DINGTALK_WEBHOOK`，加签时再加 `DINGTALK_SECRET` |
+| 飞书群机器人 | `FEISHU_WEBHOOK` |
+| Telegram | `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` |
+| Bark（iOS） | `BARK_URL`，如 `https://api.day.app/你的key` |
+| 邮件 | `SMTP_HOST`、`SMTP_PORT`（默认 465）、`SMTP_USER`、`SMTP_PASSWORD`、`MAIL_TO`（逗号分隔） |
+
+不想要 Issue 提醒可在 `config.yaml` 中设置 `notify.github_issue: false`。
+
+## 本地运行
+
+```bash
+pip install -r requirements.txt
+python -m tracker.main --no-notify     # 真实数据（需能访问中证指数、东方财富）
+python -m tracker.main --demo          # 离线演示数据
+cd web && python -m http.server 8000   # 打开 http://localhost:8000
+python -m pytest -q                    # 运行测试
+```
+
+## 目录结构
+
+```
+config.yaml            规则与阈值
+tracker/fetch.py       数据获取（AKShare：中证指数官网成分股、东方财富估值与分红）
+tracker/indicators.py  股息率、分位、连续分红、支付率、分红增速
+tracker/signals.py     综合评分与买卖规则
+tracker/notify.py      各推送渠道
+tracker/main.py        每日流程：计算 → 生成网页数据 → 对比状态 → 提醒
+web/                   静态网页（ECharts），data/ 由 Actions 生成后直接部署
+state/                 信号状态与提醒记录（Actions 自动提交）
+```
+
+## 局限
+
+- 数据来自公开网页接口，接口变动可能导致个别股票获取失败（网页会列出失败的股票）；超过 30% 失败时本次不更新、不提醒。
+- 股息率按每股分红原值计算，发生送转股的个股在送转前后可能短暂失真。
+- 成分股每半年调整一次，以中证指数官网最新权重文件为准。

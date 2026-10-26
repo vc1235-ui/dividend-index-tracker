@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>红利指数个股跟踪</title>
+  <meta name="description" content="跟踪上证红利指数与中证红利指数成分股中值得投资的个股，按股息率、估值分位与分红质量给出买卖信号。">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.1/echarts.min.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-inner">
+      <div>
+        <h1>红利指数个股跟踪</h1>
+        <p class="sub">上证红利（000015）· 中证红利（000922）成分股 · 数据日期 <b id="dataDate">—</b> · 更新于 <span id="genAt">—</span></p>
+      </div>
+      <button id="themeBtn" class="ghost" title="切换明暗主题" aria-label="切换明暗主题">◐</button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div id="demoBanner" class="banner" hidden>当前为演示数据（随机生成），不代表任何真实股票。</div>
+    <div id="errorBanner" class="banner error" hidden></div>
+
+    <section class="kpis" id="kpis"></section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>股息率 × 估值分位</h2>
+        <span class="hint">右上方 = 股息率高且处于历史高位（相对便宜）。气泡大小 = 总市值，点击查看个股。</span>
+      </div>
+      <div id="scatter" class="chart chart-lg"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>成分股列表</h2>
+        <div class="filters">
+          <select id="fIndex" aria-label="指数">
+            <option value="">全部指数</option>
+            <option value="000015">上证红利</option>
+            <option value="000922">中证红利</option>
+            <option value="both">两者共有</option>
+          </select>
+          <select id="fSignal" aria-label="信号">
+            <option value="">全部信号</option>
+            <option value="BUY">买入</option>
+            <option value="SELL">卖出</option>
+            <option value="HOLD">持有/观望</option>
+          </select>
+          <label class="check"><input type="checkbox" id="fQuality"> 仅看通过质量筛选</label>
+          <input id="fSearch" type="search" placeholder="代码 / 名称" aria-label="搜索">
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="table">
+          <thead>
+            <tr>
+              <th data-k="name">股票</th>
+              <th data-k="signal">信号</th>
+              <th data-k="score" class="num">评分</th>
+              <th data-k="price" class="num">现价</th>
+              <th data-k="yield" class="num">股息率TTM</th>
+              <th data-k="yield_pct" class="num" title="当前股息率在近 N 年中的分位，越高越便宜">股息率分位</th>
+              <th data-k="pe" class="num">PE(TTM)</th>
+              <th data-k="pe_pct" class="num" title="当前 PE 在近 N 年中的分位，越低越便宜">PE分位</th>
+              <th data-k="pb" class="num">PB</th>
+              <th data-k="years" class="num">连续分红</th>
+              <th data-k="payout" class="num">支付率</th>
+              <th data-k="dps_cagr" class="num" title="近 3 年每股分红复合增速">分红增速</th>
+              <th data-k="change_1y" class="num">近1年涨跌</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="foot-note" id="countNote"></p>
+    </section>
+
+    <section class="card" id="detail" hidden>
+      <div class="card-head">
+        <h2 id="dTitle">个股详情</h2>
+        <button class="ghost" id="dClose" aria-label="关闭详情">✕</button>
+      </div>
+      <div id="dReasons" class="reasons"></div>
+      <div class="grid2">
+        <div><h3>股价与股息率</h3><div id="cPrice" class="chart"></div></div>
+        <div><h3>股息率区间（含买卖线）</h3><div id="cYield" class="chart"></div></div>
+        <div><h3>PE(TTM) 与历史分位带</h3><div id="cPe" class="chart"></div></div>
+        <div><h3>年度每股分红与支付率</h3><div id="cDiv" class="chart"></div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>信号提醒记录</h2></div>
+      <ul id="log" class="log"></ul>
+    </section>
+
+    <section class="card rules">
+      <div class="card-head"><h2>规则说明</h2></div>
+      <div id="rules"></div>
+    </section>
+
+    <p class="disclaimer">数据来源：中证指数有限公司、东方财富（经 AKShare）。股息率按过去 365 天已除息的每股现金分红 ÷ 不复权收盘价计算。规则信号仅供学习研究，不构成投资建议。</p>
+  </main>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>
