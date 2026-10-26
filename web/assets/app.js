@@ -31,6 +31,15 @@
     return out;
   }
 
+  // 图表库加载失败时只隐藏图表、给出提示，不影响表格等其余部分
+  function chartsAvailable() {
+    if (window.echarts) return true;
+    document.querySelectorAll(".chart").forEach((el) => {
+      el.innerHTML = '<p class="dim" style="padding:16px">图表库加载失败，请刷新页面重试。</p>';
+    });
+    return false;
+  }
+
   function chart(id) {
     if (!charts[id]) charts[id] = echarts.init(document.getElementById(id), null, { renderer: "canvas" });
     return charts[id];
@@ -172,7 +181,7 @@
 
   // ---------- 散点图 ----------
   function renderScatter() {
-    if (!state.summary) return;
+    if (!state.summary || !chartsAvailable()) return;
     const rules = state.summary.rules;
     const rows = filtered().filter((s) => s.yield != null && s.yield_pct != null);
     const maxCap = Math.max(...rows.map((s) => s.mcap || 0), 1);
@@ -236,7 +245,7 @@
 
   function renderDetailCharts() {
     const d = state.detail;
-    if (!d || $("#detail").hidden) return;
+    if (!d || $("#detail").hidden || !chartsAvailable()) return;
     const rules = state.summary.rules;
     const accent = css("--accent"), muted = css("--muted"), buy = css("--buy"), sell = css("--sell");
     const yieldPct = d.yield.map((v) => (v == null ? null : +(v * 100).toFixed(2)));
