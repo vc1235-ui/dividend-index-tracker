@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import yaml
+from datetime import date
 
 from tracker import indicators, main, signals
 from tracker.fetch import DemoProvider
@@ -364,3 +365,11 @@ def test_industry_failure_is_fast_and_retried_next_run(tmp_path):
     assert time.monotonic() - t0 < 3  # 只重试一次、等待 2 秒
     assert not (tmp_path / "industries.json").exists()  # 失败不写缓存，下次运行会再试
     assert main.load_industries(DemoProvider(n=5), ["600000"], tmp_path / "industries.json") == {"600000": "公用事业"}
+
+
+def test_industry_display_strips_level_suffix(tmp_path):
+    import json
+
+    (tmp_path / "industries.json").write_text(json.dumps(
+        {"601398": {"industry": "银行Ⅱ", "updated": date.today().isoformat()}}, ensure_ascii=False), "utf-8")
+    assert main.load_industries(DemoProvider(n=1), ["601398"], tmp_path / "industries.json") == {"601398": "银行"}

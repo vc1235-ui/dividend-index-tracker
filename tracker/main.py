@@ -155,7 +155,8 @@ def load_industries(provider, codes: list[str], path: Path, max_age_days: int = 
             dump_json(path, cache)
         except Exception as e:
             log.warning("行业数据获取失败，本次显示为“未知”: %s", e)
-    return {c: cache[c]["industry"] if c in cache else "未知" for c in codes}
+    # 申万二级行业与一级同名时带“Ⅱ”后缀（如“银行Ⅱ”），显示时去掉
+    return {c: cache[c]["industry"].rstrip("Ⅱ").strip() if c in cache else "未知" for c in codes}
 
 
 def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: bool = False,
