@@ -37,7 +37,20 @@ jobs:
 
       - name: 检查是否配置 Cloudflare
         id: cf
-        run: echo "enabled=${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}" >> "$GITHUB_OUTPUT"
+        env:
+          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' || vars.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: |
+          echo "CLOUDFLARE_API_TOKEN（Secret）已配置: $HAS_TOKEN"
+          echo "CLOUDFLARE_ACCOUNT_ID（Secret 或 Variable）已配置: $HAS_ACCOUNT"
+          if [ "$HAS_TOKEN" = true ] && [ "$HAS_ACCOUNT" = true ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            if [ "$HAS_TOKEN" = true ] || [ "$HAS_ACCOUNT" = true ]; then
+              echo "::warning::Cloudflare 配置不完整，本次不部署到 Cloudflare。请在 Settings → Secrets and variables → Actions → Repository secrets 中检查名称"
+            fi
+          fi
 
       - uses: actions/setup-python@v5
         with:
@@ -85,7 +98,7 @@ jobs:
         if: steps.cf.outputs.enabled == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           # 首次运行时创建项目；已存在会报错，忽略即可
           npx --yes wrangler@4 pages project create "$CF_PROJECT" --production-branch=main || true

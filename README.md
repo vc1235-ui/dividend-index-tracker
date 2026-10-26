@@ -47,7 +47,7 @@
 
 1. 在 Cloudflare 控制台 → 右上角头像 → My Profile → API Tokens → Create Token → Create Custom Token，权限选 **Account → Cloudflare Pages → Edit**，创建后复制令牌。
 2. 在 Cloudflare 控制台首页（Workers & Pages 页右侧）复制 **Account ID**。
-3. 在本仓库 Settings → Secrets and variables → Actions 添加 Secret：`CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`。
+3. 在本仓库 Settings → Secrets and variables → Actions → **Repository secrets**（不是 Environment secrets）添加 `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID`。Account ID 不是机密，也可以放在 Variables 里。
 
 下次运行时会自动创建 Pages 项目并部署，网址为 `https://dividend-index-tracker.pages.dev/`。配置 Cloudflare 后默认不再部署 GitHub Pages。可选的仓库变量（Settings → Secrets and variables → Actions → Variables）：
 
