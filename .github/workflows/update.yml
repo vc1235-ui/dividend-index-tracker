@@ -100,6 +100,14 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
+          # 去掉复制粘贴时带入的空格/换行，并校验 Account ID 格式（32 位十六进制）
+          CLOUDFLARE_ACCOUNT_ID="$(printf '%s' "$CLOUDFLARE_ACCOUNT_ID" | tr -d '[:space:]')"
+          CLOUDFLARE_API_TOKEN="$(printf '%s' "$CLOUDFLARE_API_TOKEN" | tr -d '[:space:]')"
+          if ! printf '%s' "$CLOUDFLARE_ACCOUNT_ID" | grep -Eq '^[0-9a-fA-F]{32}$'; then
+            echo "::error::CLOUDFLARE_ACCOUNT_ID 格式不对：去掉空白后长度为 ${#CLOUDFLARE_ACCOUNT_ID}，应为 32 位十六进制。请在 Cloudflare 控制台 Workers & Pages 页右侧复制 Account ID，只粘贴这 32 个字符"
+            exit 1
+          fi
+          export CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN
           # 首次运行时创建项目；已存在会报错，忽略即可
           npx --yes wrangler@4 pages project create "$CF_PROJECT" --production-branch=main || true
           npx --yes wrangler@4 pages deploy web --project-name="$CF_PROJECT" --branch=main --commit-dirty=true
