@@ -116,8 +116,10 @@ jobs:
             exit 1
           fi
           export CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN
-          # 首次运行时创建项目；已存在会报错，忽略即可
-          npx --yes wrangler@4 pages project create "$CF_PROJECT" --production-branch=main || true
+          # 项目不存在时才创建（首次运行）
+          if ! npx --yes wrangler@4 pages project list 2>/dev/null | grep -qE "(^|[^-[:alnum:]])${CF_PROJECT}([^-[:alnum:]]|$)"; then
+            npx --yes wrangler@4 pages project create "$CF_PROJECT" --production-branch=main || true
+          fi
           npx --yes wrangler@4 pages deploy web --project-name="$CF_PROJECT" --branch=main --commit-dirty=true
 
       - uses: actions/upload-pages-artifact@v3
