@@ -21,12 +21,23 @@ concurrency:
   group: update-and-deploy
   cancel-in-progress: false
 
+env:
+  # Cloudflare Pages 项目名，可用仓库变量 CLOUDFLARE_PROJECT_NAME 覆盖
+  CF_PROJECT: ${{ vars.CLOUDFLARE_PROJECT_NAME || 'dividend-index-tracker' }}
+
 jobs:
   update:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      # 配置了 Cloudflare 时默认不再部署 GitHub Pages；仓库变量 ALSO_GITHUB_PAGES=true 可两边都部署
+      github_pages: ${{ steps.cf.outputs.enabled != 'true' || vars.ALSO_GITHUB_PAGES == 'true' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: 检查是否配置 Cloudflare
+        id: cf
+        run: echo "enabled=${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         with:
@@ -40,7 +51,7 @@ jobs:
         env:
           TZ: Asia/Shanghai
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          SITE_URL: ${{ vars.SITE_URL || (steps.cf.outputs.enabled == 'true' && format('https://{0}.pages.dev/', env.CF_PROJECT)) || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
           SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
@@ -70,12 +81,24 @@ jobs:
             git push origin HEAD:main
           fi
 
+      - name: 部署到 Cloudflare Pages
+        if: steps.cf.outputs.enabled == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # 首次运行时创建项目；已存在会报错，忽略即可
+          npx --yes wrangler@4 pages project create "$CF_PROJECT" --production-branch=main || true
+          npx --yes wrangler@4 pages deploy web --project-name="$CF_PROJECT" --branch=main --commit-dirty=true
+
       - uses: actions/upload-pages-artifact@v3
+        if: steps.cf.outputs.enabled != 'true' || vars.ALSO_GITHUB_PAGES == 'true'
         with:
           path: web
 
   deploy:
     needs: update
+    if: needs.update.outputs.github_pages == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

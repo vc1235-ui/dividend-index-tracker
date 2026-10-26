@@ -2,7 +2,7 @@
 
 跟踪 **上证红利指数（000015）** 与 **中证红利指数（000922）** 的全部成分股，按股息率、估值历史分位和分红质量筛选值得投资的个股，以网页图表展示；当个股触发**买入**或**卖出**信号时自动推送提醒。
 
-- 网页：<https://vc1235-ui.github.io/dividend-index-tracker/>（启用 GitHub Pages 后可访问，见下文）
+- 网页：部署在 GitHub Pages（<https://vc1235-ui.github.io/dividend-index-tracker/>）或 Cloudflare Pages（<https://dividend-index-tracker.pages.dev/>），见下文“部署”
 - 每个交易日北京时间 20:17 由 GitHub Actions 自动更新，无需服务器
 
 > ⚠️ 规则信号仅供学习研究，不构成投资建议。
@@ -37,9 +37,31 @@
 
 ## 部署（一次性设置）
 
-1. **启用网页**：仓库 Settings → Pages → Build and deployment → Source 选择 **GitHub Actions**。
-2. **首次运行**：Actions → “更新数据并部署” → Run workflow。约 5–10 分钟后网页即可访问。
-3. **配置提醒**（可选，可多选）：Settings → Secrets and variables → Actions → New repository secret。
+网页可以部署到 **GitHub Pages** 或 **Cloudflare Pages**，二选一即可。
+
+**方式 A：GitHub Pages**
+
+仓库 Settings → Pages → Build and deployment → Source 选择 **GitHub Actions**。网址为 `https://<用户名>.github.io/dividend-index-tracker/`。
+
+**方式 B：Cloudflare Pages**
+
+1. 在 Cloudflare 控制台 → 右上角头像 → My Profile → API Tokens → Create Token → Create Custom Token，权限选 **Account → Cloudflare Pages → Edit**，创建后复制令牌。
+2. 在 Cloudflare 控制台首页（Workers & Pages 页右侧）复制 **Account ID**。
+3. 在本仓库 Settings → Secrets and variables → Actions 添加 Secret：`CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`。
+
+下次运行时会自动创建 Pages 项目并部署，网址为 `https://dividend-index-tracker.pages.dev/`。配置 Cloudflare 后默认不再部署 GitHub Pages。可选的仓库变量（Settings → Secrets and variables → Actions → Variables）：
+
+| 变量 | 作用 |
+| --- | --- |
+| `CLOUDFLARE_PROJECT_NAME` | Pages 项目名（默认 `dividend-index-tracker`；若该名称已被占用，在 Cloudflare 中看到的实际网址可能不同） |
+| `SITE_URL` | 提醒消息中“查看图表”的链接，绑定自定义域名后填写 |
+| `ALSO_GITHUB_PAGES` | 设为 `true` 时同时部署到 GitHub Pages |
+
+> 国内访问：`*.github.io` 和 `*.pages.dev` 在大陆都可能不稳定。在 Cloudflare Pages 项目的 Custom domains 中绑定自己的域名，通常访问更稳定。
+
+**首次运行**：Actions → “更新数据并部署” → Run workflow。约 10 分钟后网页即可访问。
+
+**配置提醒**（可选，可多选）：Settings → Secrets and variables → Actions → New repository secret。
 
 | 渠道 | Secret |
 | --- | --- |
