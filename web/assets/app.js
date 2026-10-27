@@ -101,6 +101,7 @@
     renderKpis();
     renderRules();
     renderLog();
+    renderChanges();
     renderIndustryOptions();
     bindFilters();
     renderTable();
@@ -439,6 +440,14 @@
     $("#log").innerHTML = log.length
       ? log.slice(0, 200).map((a) => `<li><span class="date">${a.date}</span><span class="sig ${a.signal}">${LABEL[a.signal]}</span><b>${esc(a.name)}</b><span class="code">${a.code}</span><span class="why">${(a.reasons || []).map(esc).join("；")}</span></li>`).join("")
       : `<li class="dim">暂无提醒记录。信号由“持有/观望”变为“买入”或“卖出”时会记录并推送。</li>`;
+  }
+
+  function renderChanges() {
+    const list = state.summary.constituent_changes || [];
+    const names = (xs) => xs.length ? xs.map((x) => `${esc(x.name)}<span class="code">${x.code}</span>`).join("、") : "无";
+    $("#changes").innerHTML = list.length
+      ? list.map((c) => `<li><span class="date">${c.date}</span><b>${esc(c.index_name)}</b><span>调入 ${names(c.added)}</span><span class="why">调出 ${names(c.removed)}</span></li>`).join("")
+      : `<li class="dim">开始跟踪以来暂无成分股调整（两个指数会定期调整样本，调整生效后这里会显示）。</li>`;
   }
 
   function renderRules() {

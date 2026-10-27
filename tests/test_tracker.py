@@ -235,11 +235,11 @@ def test_incremental_falls_back_when_incomplete(tmp_path):
     assert broken.full_calls == 1 + 8  # 核对发现缺数据 → 全部改为全量
     assert res["data_date"] == days[1].strftime("%Y-%m-%d")
 
-    # 超过全量刷新周期时不走增量
+    # 超过全量刷新周期时，每次只轮流全量刷新 full_refresh_per_run 只，其余仍走增量
     stale = CountingProvider(days[1], n=8)
-    main.run(stale, {**cfg, "full_refresh_days": 0}, tmp_path / "w3", tmp_path / "s3", send=False,
-             cache=HistoryCache(tmp_path / "cache", cfg["history_years"]))
-    assert stale.incremental_calls == 0 and stale.full_calls == 8
+    main.run(stale, {**cfg, "full_refresh_days": 0, "full_refresh_per_run": 3}, tmp_path / "w3", tmp_path / "s3",
+             send=False, cache=HistoryCache(tmp_path / "cache", cfg["history_years"]))
+    assert stale.incremental_calls == 1 and stale.full_calls == 3 + 1  # 3 只轮换 + 1 只核对
 
 
 def test_eastmoney_incremental_parsing(monkeypatch):
@@ -480,3 +480,43 @@ def test_backfill_runs_once_and_sets_since(tmp_path):
     for s in again["stocks"]:
         sig, n = before[s["code"]]
         assert s["signal_days"] == (n + 2 if s["signal"] == sig else 1)
+
+
+def test_constituent_changes_detected_and_notified(tmp_path, monkeypatch):
+    from tracker import notify
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text("utf-8"))
+    cfg.update(request_interval=0)
+    _mark_backfilled(tmp_path / "s")
+    first = main.run(DemoProvider(n=12, end="2026-10-23"), cfg, tmp_path / "w", tmp_path / "s", send=False)
+    assert first["member_changes"] == []  # 第一次没有可比较的旧名单
+
+    class Adjusted(DemoProvider):  # 中证红利调入 1 只新股、调出 1 只
+        def constituents(self, index_code):
+            df = super().constituents(index_code)
+            if index_code == "000922":
+                df = df[df["code"] != self.codes[-1]]
+                df.loc[len(df)] = {"code": "601999", "name": "新调入股", "weight": 1.0}
+            return df
+
+    sent = []
+    monkeypatch.setattr(notify, "dispatch", lambda alerts, d, c, url, changes=None: sent.append((alerts, changes)))
+    res = main.run(Adjusted(n=12, end="2026-10-23"), cfg, tmp_path / "w", tmp_path / "s", send=True)
+    (chg,) = res["member_changes"]
+    assert chg["index_name"] == "中证红利"
+    assert chg["added"] == [{"code": "601999", "name": "新调入股"}]
+    assert [x["code"] for x in chg["removed"]] == [DemoProvider(n=12).codes[-1]]
+    assert sent and sent[0][1] == res["member_changes"]  # 同一数据日期没有新信号，但成分股调整照样通知
+    summary = json.loads((tmp_path / "w" / "data" / "summary.json").read_text("utf-8"))
+    assert summary["constituent_changes"][0]["added"][0]["code"] == "601999"
+
+
+def test_message_only_new_signals_and_changes():
+    from tracker import notify
+
+    changes = [{"index_name": "上证红利", "added": [{"code": "600000", "name": "浦发银行"}], "removed": []}]
+    title, body = notify.build_message([], "2026-10-27", None, changes)
+    assert title == "红利指数提醒 2026-10-27：成分股调整"
+    assert "上证红利：调入 浦发银行（600000）；调出 无" in body
+    title, _ = notify.build_message([{"code": "1", "name": "A", "signal": "BUY", "reasons": []}], "2026-10-27", None)
+    assert title == "红利指数提醒 2026-10-27：新买入 1 / 新卖出 0"

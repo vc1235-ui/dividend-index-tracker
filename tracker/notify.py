@@ -34,10 +34,14 @@ log = logging.getLogger(__name__)
 TIMEOUT = 20
 
 
-def build_message(alerts: list[dict], data_date: str, site_url: str | None) -> tuple[str, str]:
+def build_message(alerts: list[dict], data_date: str, site_url: str | None,
+                  changes: list[dict] | None = None) -> tuple[str, str]:
     buys = [a for a in alerts if a["signal"] == "BUY"]
     sells = [a for a in alerts if a["signal"] == "SELL"]
-    title = f"红利指数信号 {data_date}：买入 {len(buys)} / 卖出 {len(sells)}"
+    parts = [f"新买入 {len(buys)} / 新卖出 {len(sells)}"] if alerts else []
+    if changes:
+        parts.append("成分股调整")
+    title = f"红利指数提醒 {data_date}：{'；'.join(parts)}"
     lines = [f"## {title}", ""]
     for group, emoji in ((buys, "🔴"), (sells, "🟢")):  # 红买绿卖，与网页一致
         for a in group:
@@ -49,6 +53,11 @@ def build_message(alerts: list[dict], data_date: str, site_url: str | None) -> t
             )
             for r in a["reasons"]:
                 lines.append(f"  - {r}")
+    if changes:
+        lines += ["", "### 成分股调整"]
+        for c in changes:
+            fmt = lambda xs: "、".join(f"{x['name']}（{x['code']}）" for x in xs) or "无"
+            lines.append(f"- {c['index_name']}：调入 {fmt(c['added'])}；调出 {fmt(c['removed'])}")
     lines.append("")
     if site_url:
         lines.append(f"[查看图表]({site_url})")
@@ -146,11 +155,12 @@ def send_email(title: str, body: str) -> None:
 CHANNELS = [send_serverchan, send_pushplus, send_wecom, send_dingtalk, send_feishu, send_telegram, send_bark, send_email]
 
 
-def dispatch(alerts: list[dict], data_date: str, cfg: dict, site_url: str | None) -> None:
-    if not alerts:
-        log.info("无新信号，不发送提醒")
+def dispatch(alerts: list[dict], data_date: str, cfg: dict, site_url: str | None,
+             changes: list[dict] | None = None) -> None:
+    if not alerts and not changes:
+        log.info("无新信号、无成分股调整，不发送提醒")
         return
-    title, body = build_message(alerts, data_date, site_url)
+    title, body = build_message(alerts, data_date, site_url, changes)
     log.info("发送提醒：%s\n%s", title, body)
     senders = list(CHANNELS)
     if cfg.get("github_issue", True):

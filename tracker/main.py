@@ -43,10 +43,14 @@ def dump_json(path: Path, obj) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), "utf-8")
 
 
-def collect_members(provider, cfg: dict, cache_path: Path) -> dict[str, dict]:
-    """合并各指数成分股：code -> {name, indices: {指数代码: 权重}}。获取失败时使用上次缓存。"""
+def collect_members(provider, cfg: dict, cache_path: Path) -> tuple[dict[str, dict], list[dict]]:
+    """合并各指数成分股：code -> {name, indices: {指数代码: 权重}}。获取失败时使用上次缓存。
+
+    每次运行都从中证指数官网重新获取，与上次的名单比较，返回成分股调整记录（调入 / 调出）。
+    """
     cache = load_json(cache_path, {})
     members: dict[str, dict] = {}
+    changes: list[dict] = []
     for idx in cfg["indices"]:
         code = idx["code"]
         try:
@@ -57,6 +61,15 @@ def collect_members(provider, cfg: dict, cache_path: Path) -> dict[str, dict]:
                 {"code": str(r.code).zfill(6), "name": str(r.name), "weight": None if pd.isna(r.weight) else float(r.weight)}
                 for r in df.itertuples()
             ]
+            if code in cache:
+                old = {r["code"]: r["name"] for r in cache[code]["rows"]}
+                new = {r["code"]: r["name"] for r in rows}
+                added = [{"code": c, "name": new[c]} for c in sorted(set(new) - set(old))]
+                removed = [{"code": c, "name": old[c]} for c in sorted(set(old) - set(new))]
+                if added or removed:
+                    changes.append({"date": date.today().isoformat(), "index": code, "index_name": idx["name"],
+                                    "added": added, "removed": removed})
+                    log.info("%s 成分股调整：调入 %d 只，调出 %d 只", idx["name"], len(added), len(removed))
             cache[code] = {"updated": date.today().isoformat(), "rows": rows}
         except Exception as e:
             if code not in cache:
@@ -67,7 +80,7 @@ def collect_members(provider, cfg: dict, cache_path: Path) -> dict[str, dict]:
             m = members.setdefault(r["code"], {"name": r["name"], "indices": {}})
             m["indices"][code] = r["weight"]
     dump_json(cache_path, cache)
-    return members
+    return members, changes
 
 
 def diff_signals(stocks: list[dict], members: set[str], state: dict, data_date: str, ncfg: dict) -> list[dict]:
@@ -110,20 +123,30 @@ def diff_signals(stocks: list[dict], members: set[str], state: dict, data_date: 
 
 
 def incremental_valuations(provider, codes: list[str], cache: HistoryCache, cfg: dict) -> dict[str, pd.DataFrame]:
-    """对有新鲜缓存的股票，用一次批量请求补上缓存之后的新数据。
+    """对有缓存的股票，用一次批量请求补上缓存之后的新数据。
 
-    缓存超过 full_refresh_days 天未全量刷新、或最新日期太旧的股票不走增量，返回值中不包含它们。
+    每次运行只对少量股票轮流全量刷新：缓存超过 full_refresh_days 天未全量刷新的股票中，
+    取最久未刷新的 full_refresh_per_run 只不走增量（返回值中不包含），其余照常增量；
+    没有缓存或缓存最新日期太旧的股票也不走增量。
     用其中一只股票的全量数据核对增量结果，不一致则整体放弃增量（调用方会改为全量拉取）。
     """
     if not hasattr(provider, "valuation_since"):
         return {}
     today = date.today()
     full_days = int(cfg.get("full_refresh_days", 7))
-    cached = {}
+    per_run = int(cfg.get("full_refresh_per_run", 12))
+    cached, stale = {}, []
     for code in codes:
         df, full_date = cache.load(code)
-        if df is not None and (today - full_date).days < full_days and (today - df["date"].max().date()).days < 30:
-            cached[code] = df
+        if df is None or (today - df["date"].max().date()).days >= 30:
+            continue
+        cached[code] = df
+        if (today - full_date).days >= full_days:
+            stale.append((full_date, code))
+    for _, code in sorted(stale)[:per_run]:
+        del cached[code]
+    if stale:
+        log.info("轮换全量刷新 %d 只（到期 %d 只）", min(per_run, len(stale)), len(stale))
     if not cached:
         return {}
     since = min(df["date"].max() for df in cached.values())
@@ -186,7 +209,7 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
     if (data_dir / "stocks").exists():
         shutil.rmtree(data_dir / "stocks")
 
-    members = collect_members(provider, cfg, state_dir / "constituents.json")
+    members, member_changes = collect_members(provider, cfg, state_dir / "constituents.json")
     need_backfill = demo or load_json(state_dir / "state.json", {}).get("backfill_version") != BACKFILL_VERSION
     index_names = {i["code"]: i["name"] for i in cfg["indices"]}
     log.info("共 %d 只成分股（去重后）", len(members))
@@ -261,10 +284,16 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
 
     data_date = max(s["date"] for s in stocks)
     state_path, log_path = state_dir / "state.json", state_dir / "signals_log.json"
+    changes_path = state_dir / "constituent_changes.json"
     state = load_json(state_path, {})
     history = load_json(log_path, [])
+    changes_log = load_json(changes_path, [])
     if demo:
-        state, history = {}, []
+        state, history, changes_log = {}, [], []
+    if member_changes:
+        changes_log = (member_changes + changes_log)[:50]
+        if not demo:
+            dump_json(changes_path, changes_log)
 
     alerts: list[dict] = []
     if state.get("last_data_date") == data_date:
@@ -303,15 +332,18 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
         "rules": rules,
         "history_years": cfg["history_years"],
         "failed": failed,
+        "constituent_changes": changes_log[:20],
         "stocks": sorted(stocks, key=lambda s: -s["score"]),
     }
     dump_json(data_dir / "summary.json", summary)
     dump_json(data_dir / "signals_log.json", history)
 
-    if send and alerts:
-        notify.dispatch(alerts, data_date, cfg["notify"], os.getenv("SITE_URL"))
-    log.info("完成：%d 只股票，%d 条新提醒，%d 只失败", len(stocks), len(alerts), len(failed))
-    return {"stocks": stocks, "alerts": alerts, "data_date": data_date}
+    # 只在出现新的买入 / 卖出信号或成分股调整时通知；信号持续不再通知
+    if send:
+        notify.dispatch(alerts, data_date, cfg["notify"], os.getenv("SITE_URL"), member_changes)
+    log.info("完成：%d 只股票，%d 条新提醒，%d 项成分股调整，%d 只失败",
+             len(stocks), len(alerts), len(member_changes), len(failed))
+    return {"stocks": stocks, "alerts": alerts, "data_date": data_date, "member_changes": member_changes}
 
 
 def main() -> None:
