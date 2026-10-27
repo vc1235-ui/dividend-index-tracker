@@ -10,7 +10,9 @@
 | 飞书机器人     | FEISHU_WEBHOOK |
 | Telegram       | TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID |
 | Bark(iOS)      | BARK_URL（如 https://api.day.app/你的key） |
-| 邮件           | SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, MAIL_TO（逗号分隔） |
+| 邮件           | SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, MAIL_TO（逗号分隔，默认发给 SMTP_USER 自己） |
+
+配置后可在 Actions 中手动运行“测试提醒”，或本地执行 `python -m tracker.notify --test`，向已配置的渠道发一条测试消息。
 """
 
 from __future__ import annotations
@@ -20,11 +22,14 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import smtplib
+import sys
 import time
 import urllib.parse
 from email.header import Header
 from email.mime.text import MIMEText
+from email.utils import formataddr
 
 import requests
 
@@ -133,15 +138,24 @@ def send_bark(title: str, body: str) -> None:
         _post(url.rstrip("/"), json={"title": title, "body": body, "group": "红利指数"})
 
 
+def plain_text(body: str) -> str:
+    """把 Markdown 消息转成适合邮件阅读的纯文本。"""
+    body = re.sub(r"\[([^\]]+)\]\((\S+?)\)", r"\1：\2", body)  # [查看图表](url) → 查看图表：url
+    body = re.sub(r"^#+\s*", "", body, flags=re.M)
+    body = re.sub(r"^>\s*", "", body, flags=re.M)
+    return body.replace("**", "")
+
+
 def send_email(title: str, body: str) -> None:
-    host, to = os.getenv("SMTP_HOST"), os.getenv("MAIL_TO")
+    host = os.getenv("SMTP_HOST")
+    user, password = os.getenv("SMTP_USER", ""), os.getenv("SMTP_PASSWORD", "")
+    to = os.getenv("MAIL_TO") or user
     if not (host and to):
         return
     port = int(os.getenv("SMTP_PORT") or "465")
-    user, password = os.getenv("SMTP_USER", ""), os.getenv("SMTP_PASSWORD", "")
-    msg = MIMEText(body, "plain", "utf-8")
+    msg = MIMEText(plain_text(body), "plain", "utf-8")
     msg["Subject"] = Header(title, "utf-8")
-    msg["From"] = user
+    msg["From"] = formataddr((str(Header("红利指数跟踪", "utf-8")), user))
     msg["To"] = to
     smtp = smtplib.SMTP_SSL(host, port, timeout=TIMEOUT) if port == 465 else smtplib.SMTP(host, port, timeout=TIMEOUT)
     with smtp:
@@ -153,6 +167,18 @@ def send_email(title: str, body: str) -> None:
 
 
 CHANNELS = [send_serverchan, send_pushplus, send_wecom, send_dingtalk, send_feishu, send_telegram, send_bark, send_email]
+
+# 各渠道需要的环境变量（用于测试时报告哪些渠道已配置）
+CHANNEL_ENV = {
+    send_serverchan: ("Server酱", ["SERVERCHAN_SENDKEY"]),
+    send_pushplus: ("PushPlus", ["PUSHPLUS_TOKEN"]),
+    send_wecom: ("企业微信", ["WECOM_WEBHOOK"]),
+    send_dingtalk: ("钉钉", ["DINGTALK_WEBHOOK"]),
+    send_feishu: ("飞书", ["FEISHU_WEBHOOK"]),
+    send_telegram: ("Telegram", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]),
+    send_bark: ("Bark", ["BARK_URL"]),
+    send_email: ("邮件", ["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"]),
+}
 
 
 def dispatch(alerts: list[dict], data_date: str, cfg: dict, site_url: str | None,
@@ -170,3 +196,33 @@ def dispatch(alerts: list[dict], data_date: str, cfg: dict, site_url: str | None
             send(title, body)
         except Exception as e:  # 单个渠道失败不影响其他渠道
             log.error("提醒发送失败 %s: %s", getattr(send, "__name__", send), e)
+
+
+def send_test() -> int:
+    """向所有已配置的推送渠道（不含 GitHub Issue）发送一条测试消息，返回失败数。"""
+    sample = [{"code": "000000", "name": "测试股票", "signal": "BUY", "price": 10.0, "yield": 0.06, "score": 80,
+               "reasons": ["这是一条测试提醒：收到即说明推送配置正确，无需处理"]}]
+    title, body = build_message(sample, "测试", os.getenv("SITE_URL"))
+    title = "【测试】" + title
+    failures, sent = 0, 0
+    for send, (name, env) in CHANNEL_ENV.items():
+        missing = [k for k in env if not os.getenv(k)]
+        if missing:
+            print(f"- {name}：未配置（缺少 {', '.join(missing)}）")
+            continue
+        try:
+            send(title, body)
+            sent += 1
+            print(f"- {name}：✅ 已发送")
+        except Exception as e:
+            failures += 1
+            print(f"- {name}：❌ 发送失败：{e}")
+    if not sent and not failures:
+        print("没有已配置的推送渠道（GitHub 站内通知无需配置，有新信号时自动创建 Issue）")
+    return failures
+
+
+if __name__ == "__main__":
+    if "--test" not in sys.argv:
+        sys.exit("用法：python -m tracker.notify --test")
+    sys.exit(1 if send_test() else 0)

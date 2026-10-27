@@ -520,3 +520,47 @@ def test_message_only_new_signals_and_changes():
     assert "上证红利：调入 浦发银行（600000）；调出 无" in body
     title, _ = notify.build_message([{"code": "1", "name": "A", "signal": "BUY", "reasons": []}], "2026-10-27", None)
     assert title == "红利指数提醒 2026-10-27：新买入 1 / 新卖出 0"
+
+
+def test_email_is_sent_as_plain_text(monkeypatch):
+    import email
+    import smtplib
+    from email.header import decode_header, make_header
+
+    from tracker import notify
+
+    sent = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            sent["server"] = (host, port)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def login(self, user, password):
+            sent["login"] = (user, password)
+
+        def sendmail(self, from_addr, to_addrs, msg):
+            sent.update(from_addr=from_addr, to=to_addrs, msg=email.message_from_string(msg))
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSMTP)
+    for k, v in {"SMTP_HOST": "smtp.qq.com", "SMTP_PORT": "", "SMTP_USER": "me@qq.com", "SMTP_PASSWORD": "code",
+                 "MAIL_TO": ""}.items():
+        monkeypatch.setenv(k, v)
+    title, body = notify.build_message([{"code": "600000", "name": "浦发银行", "signal": "BUY", "price": 10.1,
+                                         "yield": 0.052, "score": 78, "reasons": ["股息率 5.20% ≥ 5%"]}],
+                                       "2026-10-27", "https://x/")
+    notify.send_email(title, body)
+
+    assert sent["server"] == ("smtp.qq.com", 465) and sent["login"] == ("me@qq.com", "code")
+    assert sent["to"] == ["me@qq.com"]  # 未设 MAIL_TO 时发给自己
+    msg = sent["msg"]
+    assert str(make_header(decode_header(msg["Subject"]))) == "红利指数提醒 2026-10-27：新买入 1 / 新卖出 0"
+    assert "me@qq.com" in msg["From"]
+    text = msg.get_payload(decode=True).decode("utf-8")
+    assert "浦发银行（600000）" in text and "查看图表：https://x/" in text
+    assert "##" not in text and "**" not in text

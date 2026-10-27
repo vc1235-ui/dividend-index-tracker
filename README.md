@@ -79,9 +79,19 @@
 | 飞书群机器人 | `FEISHU_WEBHOOK` |
 | Telegram | `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` |
 | Bark（iOS） | `BARK_URL`，如 `https://api.day.app/你的key` |
-| 邮件 | `SMTP_HOST`、`SMTP_PORT`（默认 465）、`SMTP_USER`、`SMTP_PASSWORD`、`MAIL_TO`（逗号分隔） |
+| 邮件 | `SMTP_HOST`、`SMTP_PORT`（默认 465）、`SMTP_USER`、`SMTP_PASSWORD`、`MAIL_TO`（可选，逗号分隔；不填则发给 `SMTP_USER` 自己） |
 
 不想要 Issue 提醒可在 `config.yaml` 中设置 `notify.github_issue: false`。
+
+**邮件提醒的配置示例**（用自己的邮箱给自己发信；`SMTP_PASSWORD` 填邮箱的 SMTP 授权码 / 应用专用密码，不是登录密码）：
+
+| 邮箱 | SMTP_HOST | SMTP_PORT | SMTP_PASSWORD 从哪里获取 |
+| --- | --- | --- | --- |
+| QQ 邮箱 | `smtp.qq.com` | 465 | 网页版 设置 → 账号 → 开启 SMTP 服务 → 生成授权码 |
+| 163 邮箱 | `smtp.163.com` | 465 | 网页版 设置 → POP3/SMTP/IMAP → 开启 SMTP 服务 → 授权码 |
+| Gmail | `smtp.gmail.com` | 465 | Google 账号开启两步验证后，在“应用专用密码”中生成 |
+
+`SMTP_USER` 填完整邮箱地址。配置后到 Actions → **测试提醒** → Run workflow，几秒内就会收到一封测试邮件；日志会显示每个渠道是否发送成功及失败原因。
 
 ## 本地运行
 
