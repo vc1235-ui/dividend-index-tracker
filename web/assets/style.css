@@ -100,3 +100,15 @@ tbody tr.active { background: var(--row-hover); outline: 1px solid var(--accent)
 
 .rules ul { margin: 4px 0 10px; padding-left: 20px; }
 .disclaimer { color: var(--muted); font-size: 12px; margin: 0 0 32px; }
+
+/* 信号持续天数 */
+.sig .days { font-weight: 400; opacity: .8; margin-left: 4px; }
+
+/* 网格价位 */
+.grid-row { margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.grid-table td, .grid-table th { padding: 5px 8px; font-size: 13px; cursor: default; }
+.grid-table tr.now td { background: var(--row-hover); font-weight: 600; }
+.grid-table tr.anchor td { color: var(--muted); }
+.grid-table .lv-buy { color: var(--buy); font-weight: 600; }
+.grid-table .lv-sell { color: var(--sell); font-weight: 600; }
+.warn { color: var(--buy); }

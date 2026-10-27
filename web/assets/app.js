@@ -14,7 +14,8 @@
   // 信号徽标：超出每日名额的买入候选单独标出
   const sigBadge = (s) => s.buy_candidate
     ? `<span class="sig CAND" title="符合买入条件，超出每日推荐名额">买入候选 #${s.buy_rank}</span>`
-    : `<span class="sig ${s.signal}">${LABEL[s.signal]}</span>`;
+    : `<span class="sig ${s.signal}"${s.since ? ` title="信号自 ${s.since} 起"` : ""}>${LABEL[s.signal]}${
+      s.signal !== "HOLD" && s.signal_days ? `<span class="days">${s.signal_days}天</span>` : ""}</span>`;
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
   function quantile(arr, q) {
@@ -268,6 +269,8 @@
     const yieldPct = d.yield.map((v) => (v == null ? null : +(v * 100).toFixed(2)));
     const zoom = [{ type: "inside", start: 0, end: 100 }];
 
+    renderGrid(d);
+
     // 1. 股价与股息率
     let o = baseOption();
     o.legend.data = ["收盘价", "年线 MA250", "股息率TTM"];
@@ -330,6 +333,60 @@
       { name: "支付率", type: "line", yAxisIndex: 1, data: d.annual.map((r) => (r.payout == null ? null : +(r.payout * 100).toFixed(1))), itemStyle: { color: buy }, lineStyle: { color: buy }, connectNulls: true },
     ];
     chart("cDiv").setOption(o, true);
+  }
+
+  // ---------- 网格法买卖价位 ----------
+  function renderGrid(d) {
+    const g = d.grid;
+    if (!g) { $("#gridTable").innerHTML = '<p class="dim">暂无网格数据</p>'; $("#gridNote").textContent = ""; return; }
+    const s = state.summary.stocks.find((x) => x.code === state.current) || {};
+    const buy = css("--buy"), sell = css("--sell"), muted = css("--muted"), accent = css("--accent");
+    const n = Math.min(245, d.dates.length);
+    const close = d.close.slice(-n);
+    const prices = [...g.buy.map((x) => x.price), ...g.sell.map((x) => x.price), ...close.filter((v) => v != null)];
+    const lo = Math.min(...prices), hi = Math.max(...prices), pad = (hi - lo) * 0.06;
+    const line = (name, price, color, type) => ({
+      name, yAxis: price, lineStyle: { color, type, width: 1 },
+      label: { formatter: `${name} ${price.toFixed(2)}`, position: "insideEndTop", color, fontSize: 10 },
+    });
+    const anchorVisible = g.anchor >= lo - pad && g.anchor <= hi + pad;
+    const o = baseOption();
+    o.legend.show = false;
+    o.grid = { left: 48, right: 16, top: 16, bottom: 30 };
+    o.xAxis.data = d.dates.slice(-n);
+    Object.assign(o.yAxis, { min: +(lo - pad).toFixed(2), max: +(hi + pad).toFixed(2), scale: false });
+    Object.assign(o.yAxis.axisLabel, { showMinLabel: false, showMaxLabel: false });
+    o.series = [{
+      name: "收盘价", type: "line", data: close, showSymbol: false, lineStyle: { width: 1.5, color: accent }, itemStyle: { color: accent },
+      markLine: {
+        symbol: "none", silent: true,
+        data: [
+          ...(anchorVisible ? [line("中枢", g.anchor, muted, "solid")] : []),
+          ...g.buy.map((x) => line(`买${x.level}`, x.price, buy, "dashed")),
+          ...g.sell.map((x) => line(`卖${x.level}`, x.price, sell, "dashed")),
+        ],
+      },
+    }];
+    chart("cGrid").setOption(o, true);
+
+    // 价位表：卖出档（远→近）、现价、买入档（近→远）
+    const pct = (v) => (v == null ? "—" : (v * 100).toFixed(2) + "%");
+    const gap = (v) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`);
+    const zone = (z) => (z === "低估" ? '<span class="lv-buy">低估区</span>' : z === "高估" ? '<span class="lv-sell">高估区</span>' : "中枢");
+    const row = (label, cls, x) => `<tr><td class="${cls}">${label}</td><td class="num">${x.price.toFixed(2)}</td><td class="num">${pct(x.yield)}</td><td class="num">${gap(x.gap)}</td><td>${zone(x.zone)}</td></tr>`;
+    $("#gridTable").innerHTML = `<table class="grid-table"><thead><tr><th>档位</th><th class="num">价格</th><th class="num">对应股息率</th><th class="num">距现价</th><th>估值区</th></tr></thead><tbody>
+      ${g.sell.slice().reverse().map((x) => row(`卖出 ${x.level}`, "lv-sell", x)).join("")}
+      <tr class="now"><td>现价</td><td class="num">${g.price.toFixed(2)}</td><td class="num">${pct(s.yield)}</td><td class="num">—</td><td>${g.position < -0.5 ? "低估区" : g.position > 0.5 ? "高估区" : "中枢附近"}</td></tr>
+      ${g.buy.map((x) => row(`买入 ${x.level}`, "lv-buy", x)).join("")}
+    </tbody></table>`;
+
+    const pos = g.position;
+    const where = Math.abs(pos) < 0.5 ? `现价在中枢（${g.anchor.toFixed(2)}）附近`
+      : `现价在中枢（${g.anchor.toFixed(2)}）${pos < 0 ? "下方" : "上方"}约 ${Math.abs(pos).toFixed(1)} 档，处于${pos < 0 ? "低估" : "高估"}区`;
+    const warn = s.signal === "SELL"
+      ? `<br><span class="warn">⚠ 当前为卖出信号（${esc((s.reasons || [])[0] || "")}），不建议按网格买入。</span>` : "";
+    $("#gridNote").innerHTML = `中枢 = ${esc(g.basis)}，每档间距 ${(g.step * 100).toFixed(0)}%（等比）。${where}。`
+      + `用法（底仓 + 网格）：跌到买入档分批买入；涨到卖出档时，低估区只卖出网格仓位、保留底仓，高估区可逐步减仓。${warn}`;
   }
 
   function renderAllCharts() {

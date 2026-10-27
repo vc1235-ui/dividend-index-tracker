@@ -19,6 +19,12 @@ request_interval: 0.3
 # 估值历史走增量更新（每天一次批量请求），每隔多少天对每只股票全量刷新一次
 full_refresh_days: 7
 
+# 个股面板中的网格法买卖价位：以“股息率回到近年中位数时的价格”为中枢，
+# 每跌 step 一档为买入价、每涨 step 一档为卖出价，上下各 levels 档
+grid:
+  step: 0.05
+  levels: 4
+
 rules:
   # “值得投资”的基本门槛（质量筛选）
   quality:

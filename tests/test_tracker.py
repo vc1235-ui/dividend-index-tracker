@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -373,3 +374,44 @@ def test_industry_display_strips_level_suffix(tmp_path):
     (tmp_path / "industries.json").write_text(json.dumps(
         {"601398": {"industry": "银行Ⅱ", "updated": date.today().isoformat()}}, ensure_ascii=False), "utf-8")
     assert main.load_industries(DemoProvider(n=1), ["601398"], tmp_path / "industries.json") == {"601398": "银行"}
+
+
+def test_grid_levels():
+    close = np.full(100, 20.0)
+    close[-1] = 18.0
+    yld = np.full(100, 0.05)  # 每股分红 1 元，股息率中位数 5% → 中枢 20 元
+    g = indicators.grid_levels(close, yld, 1.0, 0.05, 3)
+    assert g["anchor"] == 20.0 and "5.00%" in g["basis"]
+    assert -2.2 < g["position"] < -2.1  # 18 元在中枢下方约 2.16 档
+    # 买入：现价下方最近 3 档；卖出：现价上方最近 3 档（含中枢本身）
+    assert [x["price"] for x in g["buy"]] == [17.28, 16.45, 15.67]
+    assert [x["price"] for x in g["sell"]] == [18.14, 19.05, 20.0]
+    assert [x["zone"] for x in g["sell"]] == ["低估", "低估", "中枢"]
+    assert [x["level"] for x in g["buy"]] == [1, 2, 3]
+    assert g["buy"][0]["yield"] == pytest.approx(1 / 17.277, abs=1e-4)
+    assert g["sell"][0]["gap"] == pytest.approx(18.14 / 18 - 1, abs=1e-3)
+
+    # 现价远离中枢时，档位仍然紧贴现价
+    far = indicators.grid_levels(np.r_[np.full(99, 20.0), 9.0], yld, 1.0, 0.05, 2)
+    assert far["position"] < -16
+    assert 9.0 > far["buy"][0]["price"] > 9.0 / 1.05 - 0.01 and 9.0 < far["sell"][0]["price"] < 9.0 * 1.05 + 0.01
+
+    # 现价正好在网格线上：该线不算买也不算卖
+    on = indicators.grid_levels(np.r_[np.full(99, 20.0), 21.0], yld, 1.0, 0.05, 1)
+    assert on["buy"][0]["price"] == 20.0 and on["sell"][0]["price"] == 22.05
+
+    g0 = indicators.grid_levels(np.linspace(10, 12, 300), np.zeros(300), 0.0, 0.05, 2)  # 无分红 → 收盘价中位数
+    assert "收盘价中位数" in g0["basis"] and g0["buy"][0]["yield"] is None
+
+
+def test_signal_days_counts_trading_days(tmp_path):
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text("utf-8"))
+    cfg.update(request_interval=0)
+    days = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=3)
+    first = main.run(CountingProvider(days[0], n=10), cfg, tmp_path / "w", tmp_path / "s", send=False)
+    assert all(s["signal_days"] == 1 for s in first["stocks"])
+    before = {s["code"]: s["signal"] for s in first["stocks"]}
+    third = main.run(CountingProvider(days[2], n=10), cfg, tmp_path / "w", tmp_path / "s", send=False)
+    for s in third["stocks"]:
+        assert s["signal_days"] == (3 if before[s["code"]] == s["signal"] else 1)
+    assert "grid" in json.loads((tmp_path / "w" / "data" / "stocks" / f"{s['code']}.json").read_text("utf-8"))

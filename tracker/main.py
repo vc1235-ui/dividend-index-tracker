@@ -184,7 +184,9 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
         div = provider.dividends(code)
         if not demo:
             time.sleep(cfg.get("request_interval", 0.5))
-        return indicators.compute(val, div, cfg["history_years"], rules["sell"]["dividend_cut_ratio"])
+        grid = cfg.get("grid", {})
+        return indicators.compute(val, div, cfg["history_years"], rules["sell"]["dividend_cut_ratio"],
+                                  grid.get("step", 0.05), grid.get("levels", 4))
 
     # 耗时几乎全在网络请求上，多线程并发拉取；并发失败的再逐只串行补拉一次
     results: dict[str, tuple[dict, dict]] = {}
@@ -254,9 +256,13 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
             dump_json(state_path, state)
             dump_json(log_path, history)
 
-    since = {c: v.get("since") for c, v in state.get("stocks", {}).items()}
+    prev = state.get("stocks", {})
     for s in stocks:
-        s["since"] = since.get(s["code"])
+        # 状态里的起始日期只在信号一致时有效（同一天重复运行时状态不更新，信号可能已因规则调整而变化）
+        p = prev.get(s["code"], {})
+        s["since"] = p.get("since") if p.get("signal") == s["signal"] else data_date
+        # 信号持续的交易日数（含当天），按该股自身的交易日计算
+        s["signal_days"] = sum(d >= s["since"] for d in results[s["code"]][1]["dates"]) if s["since"] else None
 
     summary = {
         "generated_at": datetime.now(CST).strftime("%Y-%m-%d %H:%M"),

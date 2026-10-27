@@ -106,7 +106,46 @@ def _num(x, nd: int = 4):
     return round(x, nd) if math.isfinite(x) else None
 
 
-def compute(val: pd.DataFrame, div: pd.DataFrame, history_years: int, cut_ratio: float) -> tuple[dict, dict]:
+def grid_levels(close: np.ndarray, yld: np.ndarray, dps_ttm: float, step: float, levels: int) -> dict:
+    """网格法买卖价位（底仓 + 网格）。
+
+    以“股息率回到近年中位数时的价格”为中枢，按 step 等比划分价格网格（中枢 × (1+step)^k）。
+    取现价下方最近的 levels 档为买入价、上方最近的 levels 档为卖出价，保证每一档都可能被触及；
+    每档标注所在估值区：中枢以下为低估区（卖出档只卖网格仓位、保留底仓），以上为高估区（可逐步减仓）。
+    没有分红数据时退回用近一年收盘价中位数做中枢。
+    """
+    price = float(close[-1])
+    hist = yld[np.isfinite(yld) & (yld > 0)]
+    if dps_ttm > 0 and hist.size >= 20:
+        anchor_yield = float(np.median(hist))
+        anchor = dps_ttm / anchor_yield
+        basis = f"股息率回到近年中位数 {anchor_yield:.2%} 时的价格"
+    else:
+        anchor = float(np.median(close[-245:]))
+        basis = "近一年收盘价中位数（无分红数据）"
+    r = 1 + step
+    position = math.log(price / anchor) / math.log(r)  # 现价相对中枢的档数，-2.3 表示在中枢下方 2.3 档
+
+    def level(n: int, k: int) -> dict:
+        p = anchor * r ** k
+        return {"level": n, "k": k, "price": round(p, 2), "yield": _num(dps_ttm / p) if dps_ttm > 0 else None,
+                "gap": _num(p / price - 1), "zone": "低估" if k < 0 else "高估" if k > 0 else "中枢"}
+
+    below = math.ceil(position - 1e-9) - 1  # 现价下方最近一档
+    above = math.floor(position + 1e-9) + 1  # 现价上方最近一档
+    return {
+        "anchor": round(anchor, 2),
+        "basis": basis,
+        "step": step,
+        "price": round(price, 2),
+        "position": _num(position, 2),
+        "buy": [level(i + 1, below - i) for i in range(levels)],
+        "sell": [level(i + 1, above + i) for i in range(levels)],
+    }
+
+
+def compute(val: pd.DataFrame, div: pd.DataFrame, history_years: int, cut_ratio: float,
+            grid_step: float = 0.05, grid_count: int = 4) -> tuple[dict, dict]:
     """返回 (当前指标, 用于画图的历史序列)。"""
     val = val.dropna(subset=["date", "close"]).sort_values("date")
     val = val[val["close"] > 0]
@@ -161,5 +200,6 @@ def compute(val: pd.DataFrame, div: pd.DataFrame, history_years: int, cut_ratio:
             for e, d in zip(paid_events(div)["ex_date"], paid_events(div)["dps"])
             if e >= dates[0]
         ],
+        "grid": grid_levels(close, yld, float(ttm[-1]), grid_step, grid_count),
     }
     return metrics, series
