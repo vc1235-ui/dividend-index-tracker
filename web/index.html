@@ -93,7 +93,12 @@
       <div class="grid2 grid-row">
         <div><h3>网格法买卖价位（近一年股价）</h3><div id="cGrid" class="chart"></div></div>
         <div>
-          <h3>网格价位表</h3>
+          <div class="grid-head">
+            <h3>网格价位表</h3>
+            <label class="capital">计划投入总额
+              <input id="gridCapital" type="number" min="0" step="10000" inputmode="numeric" placeholder="如 100000"> 元
+            </label>
+          </div>
           <div id="gridTable" class="table-wrap"></div>
           <p class="foot-note" id="gridNote"></p>
         </div>

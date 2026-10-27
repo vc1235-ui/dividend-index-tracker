@@ -185,8 +185,7 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
         if not demo:
             time.sleep(cfg.get("request_interval", 0.5))
         grid = cfg.get("grid", {})
-        return indicators.compute(val, div, cfg["history_years"], rules["sell"]["dividend_cut_ratio"],
-                                  grid.get("step", 0.05), grid.get("levels", 4))
+        return indicators.compute(val, div, cfg["history_years"], rules["sell"]["dividend_cut_ratio"], grid)
 
     # 耗时几乎全在网络请求上，多线程并发拉取；并发失败的再逐只串行补拉一次
     results: dict[str, tuple[dict, dict]] = {}

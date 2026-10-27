@@ -390,6 +390,11 @@ def test_grid_levels():
     assert [x["level"] for x in g["buy"]] == [1, 2, 3]
     assert g["buy"][0]["yield"] == pytest.approx(1 / 17.277, abs=1e-4)
     assert g["sell"][0]["gap"] == pytest.approx(18.14 / 18 - 1, abs=1e-3)
+    # 仓位：底仓 40%，其余 60% 按 1:2:3 分给 3 个买入档，买完正好满仓
+    assert g["core"] == 0.4 and [x["pct"] for x in g["buy"]] == [0.1, 0.2, 0.3]
+    assert g["core"] + sum(x["pct"] for x in g["buy"]) == pytest.approx(1.0)
+    # 卖出：低估区每档卖一份网格仓位 60%/3 = 20%，中枢及以上每档 25%
+    assert [x["pct"] for x in g["sell"]] == [0.2, 0.2, 0.25]
 
     # 现价远离中枢时，档位仍然紧贴现价
     far = indicators.grid_levels(np.r_[np.full(99, 20.0), 9.0], yld, 1.0, 0.05, 2)

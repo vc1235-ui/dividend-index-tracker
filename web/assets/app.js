@@ -369,16 +369,8 @@
     }];
     chart("cGrid").setOption(o, true);
 
-    // 价位表：卖出档（远→近）、现价、买入档（近→远）
-    const pct = (v) => (v == null ? "—" : (v * 100).toFixed(2) + "%");
-    const gap = (v) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`);
-    const zone = (z) => (z === "低估" ? '<span class="lv-buy">低估区</span>' : z === "高估" ? '<span class="lv-sell">高估区</span>' : "中枢");
-    const row = (label, cls, x) => `<tr><td class="${cls}">${label}</td><td class="num">${x.price.toFixed(2)}</td><td class="num">${pct(x.yield)}</td><td class="num">${gap(x.gap)}</td><td>${zone(x.zone)}</td></tr>`;
-    $("#gridTable").innerHTML = `<table class="grid-table"><thead><tr><th>档位</th><th class="num">价格</th><th class="num">对应股息率</th><th class="num">距现价</th><th>估值区</th></tr></thead><tbody>
-      ${g.sell.slice().reverse().map((x) => row(`卖出 ${x.level}`, "lv-sell", x)).join("")}
-      <tr class="now"><td>现价</td><td class="num">${g.price.toFixed(2)}</td><td class="num">${pct(s.yield)}</td><td class="num">—</td><td>${g.position < -0.5 ? "低估区" : g.position > 0.5 ? "高估区" : "中枢附近"}</td></tr>
-      ${g.buy.map((x) => row(`买入 ${x.level}`, "lv-buy", x)).join("")}
-    </tbody></table>`;
+    state.grid = g;
+    renderGridTable();
 
     const pos = g.position;
     const where = Math.abs(pos) < 0.5 ? `现价在中枢（${g.anchor.toFixed(2)}）附近`
@@ -386,7 +378,47 @@
     const warn = s.signal === "SELL"
       ? `<br><span class="warn">⚠ 当前为卖出信号（${esc((s.reasons || [])[0] || "")}），不建议按网格买入。</span>` : "";
     $("#gridNote").innerHTML = `中枢 = ${esc(g.basis)}，每档间距 ${(g.step * 100).toFixed(0)}%（等比）。${where}。`
-      + `用法（底仓 + 网格）：跌到买入档分批买入；涨到卖出档时，低估区只卖出网格仓位、保留底仓，高估区可逐步减仓。${warn}`;
+      + `用法（底仓 + 网格）：现价先买底仓 ${(g.core * 100).toFixed(0)}%，跌到买入档按金字塔加仓（越跌买得越多，买完即满仓）；`
+      + `涨到卖出档时，低估区只卖出一份网格仓位、保留底仓，中枢及高估区每档减仓。仓位均为占计划投入总额的比例。${warn}`;
+  }
+
+  // 价位表：卖出档（远→近）、现价（底仓）、买入档（近→远）；填了投入总额时按 1 手 = 100 股算出每档股数
+  function renderGridTable() {
+    const g = state.grid;
+    if (!g) return;
+    const s = state.summary.stocks.find((x) => x.code === state.current) || {};
+    const capital = Math.max(0, parseFloat($("#gridCapital").value) || 0);
+    const noBuy = s.signal === "SELL"; // 卖出信号：不建底仓、不按网格买入
+    const pct = (v) => (v == null ? "—" : (v * 100).toFixed(2) + "%");
+    const gap = (v) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`);
+    const money = (v) => "¥" + Math.round(v).toLocaleString("zh-CN");
+    const zone = (z) => (z === "低估" ? '<span class="lv-buy">低估区</span>' : z === "高估" ? '<span class="lv-sell">高估区</span>' : "中枢");
+    let buyShares = 0, buyAmount = 0;
+    const size = (side, p, price) => {
+      if (side === "buy" && noBuy) return { pos: "暂停", qty: "—" };
+      const v = Math.round(p * 1000) / 10; // 避免 0.06 * 100 = 6.000000000000001
+      const pos = `${side === "buy" ? "买" : "卖"} ${v % 1 ? v.toFixed(1) : v}%`;
+      if (!capital) return { pos, qty: "—" };
+      const shares = Math.floor((capital * p) / price / 100) * 100;
+      if (side === "buy") { buyShares += shares; buyAmount += shares * price; }
+      return { pos, qty: shares ? `${shares.toLocaleString("zh-CN")} 股<span class="sub">${money(shares * price)}</span>` : "不足 1 手" };
+    };
+    const row = (label, cls, x, side) => {
+      const z = size(side, x.pct, x.price);
+      return `<tr><td class="${cls}">${label}</td><td class="num">${x.price.toFixed(2)}</td><td class="num">${pct(x.yield)}</td><td class="num">${gap(x.gap)}</td><td>${zone(x.zone)}</td><td class="num ${cls}">${z.pos}</td><td class="num">${z.qty}</td></tr>`;
+    };
+    // 卖出信号（基本面或估值风险）：不保留底仓，各卖出档平均分批清仓
+    const sells = g.sell.slice().reverse()
+      .map((x) => row(`卖出 ${x.level}`, "lv-sell", noBuy ? { ...x, pct: 1 / g.sell.length } : x, "sell")).join("");
+    const core = size("buy", g.core, g.price);
+    const nowZone = g.position < -0.5 ? "低估区" : g.position > 0.5 ? "高估区" : "中枢附近";
+    const nowRow = `<tr class="now"><td>现价·底仓</td><td class="num">${g.price.toFixed(2)}</td><td class="num">${pct(s.yield)}</td><td class="num">—</td><td>${nowZone}</td><td class="num lv-buy">${core.pos}</td><td class="num">${core.qty}</td></tr>`;
+    const buys = g.buy.map((x) => row(`买入 ${x.level}`, "lv-buy", x, "buy")).join("");
+    const total = noBuy ? `卖出信号：暂停买入；持仓不保留底仓，在 ${g.sell.length} 个卖出档平均分批清仓`
+      : capital ? `底仓 + ${g.buy.length} 档全部买入：${buyShares.toLocaleString("zh-CN")} 股，约 ${money(buyAmount)}（满仓）`
+      : "填写投入总额后，按 1 手 = 100 股计算每档股数";
+    $("#gridTable").innerHTML = `<table class="grid-table"><thead><tr><th>档位</th><th class="num">价格</th><th class="num">对应股息率</th><th class="num">距现价</th><th>估值区</th><th class="num">仓位</th><th class="num">股数 / 金额</th></tr></thead>
+      <tbody>${sells}${nowRow}${buys}</tbody><tfoot><tr><td colspan="7">${total}</td></tr></tfoot></table>`;
   }
 
   function renderAllCharts() {
@@ -422,6 +454,12 @@
       <p><b class="down">卖出</b>（任一）：股息率 ≤ ${(r.sell.max_yield * 100).toFixed(1)}%；股息率处于近 ${n} 年 ≤ ${r.sell.max_yield_percentile}% 分位；PE 为负；年度分红较上年削减超过 ${((1 - r.sell.dividend_cut_ratio) * 100).toFixed(0)}%；被调出指数</p>
       <p class="dim">阈值可在仓库的 config.yaml 中修改。</p>`;
   }
+
+  try { $("#gridCapital").value = localStorage.getItem("gridCapital") || ""; } catch (e) { /* 忽略 */ }
+  $("#gridCapital").addEventListener("input", () => {
+    try { localStorage.setItem("gridCapital", $("#gridCapital").value); } catch (e) { /* 忽略 */ }
+    renderGridTable();
+  });
 
   addEventListener("resize", () => Object.values(charts).forEach((c) => c.resize()));
   initTheme();

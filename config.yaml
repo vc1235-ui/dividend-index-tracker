@@ -24,6 +24,10 @@ full_refresh_days: 7
 grid:
   step: 0.05
   levels: 4
+  # 仓位（占计划投入总额的比例）：现价买入底仓 core；其余按 1:2:3:4 金字塔分给各买入档，买完即满仓；
+  # 低估区的卖出档每档卖出一份网格仓位 (1-core)/levels、保留底仓；中枢及高估区每档卖出 sell_high
+  core: 0.4
+  sell_high: 0.25
 
 rules:
   # “值得投资”的基本门槛（质量筛选）

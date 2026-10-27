@@ -106,13 +106,18 @@ def _num(x, nd: int = 4):
     return round(x, nd) if math.isfinite(x) else None
 
 
-def grid_levels(close: np.ndarray, yld: np.ndarray, dps_ttm: float, step: float, levels: int) -> dict:
+def grid_levels(close: np.ndarray, yld: np.ndarray, dps_ttm: float, step: float, levels: int,
+                core: float = 0.4, sell_high: float = 0.25) -> dict:
     """网格法买卖价位（底仓 + 网格）。
 
     以“股息率回到近年中位数时的价格”为中枢，按 step 等比划分价格网格（中枢 × (1+step)^k）。
     取现价下方最近的 levels 档为买入价、上方最近的 levels 档为卖出价，保证每一档都可能被触及；
     每档标注所在估值区：中枢以下为低估区（卖出档只卖网格仓位、保留底仓），以上为高估区（可逐步减仓）。
     没有分红数据时退回用近一年收盘价中位数做中枢。
+
+    仓位（占计划投入总额的比例）：现价买入底仓 core；其余 1 - core 按 1:2:…:levels 金字塔分给各买入档
+    （越跌买得越多，买完即满仓）；卖出档在低估区每档卖出一份网格仓位 (1 - core) / levels、保留底仓，
+    在中枢及高估区每档卖出 sell_high、逐步减仓。
     """
     price = float(close[-1])
     hist = yld[np.isfinite(yld) & (yld > 0)]
@@ -126,10 +131,13 @@ def grid_levels(close: np.ndarray, yld: np.ndarray, dps_ttm: float, step: float,
     r = 1 + step
     position = math.log(price / anchor) / math.log(r)  # 现价相对中枢的档数，-2.3 表示在中枢下方 2.3 档
 
-    def level(n: int, k: int) -> dict:
+    grid_total = 1 - core
+    weights = range(1, levels + 1)
+
+    def level(n: int, k: int, pct: float) -> dict:
         p = anchor * r ** k
         return {"level": n, "k": k, "price": round(p, 2), "yield": _num(dps_ttm / p) if dps_ttm > 0 else None,
-                "gap": _num(p / price - 1), "zone": "低估" if k < 0 else "高估" if k > 0 else "中枢"}
+                "gap": _num(p / price - 1), "zone": "低估" if k < 0 else "高估" if k > 0 else "中枢", "pct": round(pct, 4)}
 
     below = math.ceil(position - 1e-9) - 1  # 现价下方最近一档
     above = math.floor(position + 1e-9) + 1  # 现价上方最近一档
@@ -139,13 +147,15 @@ def grid_levels(close: np.ndarray, yld: np.ndarray, dps_ttm: float, step: float,
         "step": step,
         "price": round(price, 2),
         "position": _num(position, 2),
-        "buy": [level(i + 1, below - i) for i in range(levels)],
-        "sell": [level(i + 1, above + i) for i in range(levels)],
+        "core": core,
+        "buy": [level(i + 1, below - i, grid_total * w / sum(weights)) for i, w in enumerate(weights)],
+        "sell": [level(i + 1, k, grid_total / levels if k < 0 else sell_high)
+                 for i, k in enumerate(range(above, above + levels))],
     }
 
 
 def compute(val: pd.DataFrame, div: pd.DataFrame, history_years: int, cut_ratio: float,
-            grid_step: float = 0.05, grid_count: int = 4) -> tuple[dict, dict]:
+            grid: dict | None = None) -> tuple[dict, dict]:
     """返回 (当前指标, 用于画图的历史序列)。"""
     val = val.dropna(subset=["date", "close"]).sort_values("date")
     val = val[val["close"] > 0]
@@ -200,6 +210,7 @@ def compute(val: pd.DataFrame, div: pd.DataFrame, history_years: int, cut_ratio:
             for e, d in zip(paid_events(div)["ex_date"], paid_events(div)["dps"])
             if e >= dates[0]
         ],
-        "grid": grid_levels(close, yld, float(ttm[-1]), grid_step, grid_count),
+        "grid": grid_levels(close, yld, float(ttm[-1]), (grid or {}).get("step", 0.05), (grid or {}).get("levels", 4),
+                            (grid or {}).get("core", 0.4), (grid or {}).get("sell_high", 0.25)),
     }
     return metrics, series

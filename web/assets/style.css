@@ -112,3 +112,8 @@ tbody tr.active { background: var(--row-hover); outline: 1px solid var(--accent)
 .grid-table .lv-buy { color: var(--buy); font-weight: 600; }
 .grid-table .lv-sell { color: var(--sell); font-weight: 600; }
 .warn { color: var(--buy); }
+.grid-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.capital { color: var(--muted); font-size: 12px; display: inline-flex; align-items: center; gap: 4px; margin-top: 8px; }
+.capital input { width: 110px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; font: inherit; font-size: 13px; }
+.grid-table tfoot td { border-top: 2px solid var(--border); border-bottom: none; color: var(--muted); }
+.grid-table .sub { display: block; color: var(--muted); font-size: 11px; }
