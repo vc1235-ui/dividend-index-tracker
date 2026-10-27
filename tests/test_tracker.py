@@ -152,6 +152,7 @@ def test_concurrent_fetch_with_retry(tmp_path):
     cfg["request_interval"] = 0
 
     def timed_run(workers, name):
+        _mark_backfilled(tmp_path / f"{name}-state")
         t0 = time.monotonic()
         provider = FlakyDemoProvider(0.1, fail_once={"600000", "000042"}, n=12, end="2026-10-23")
         res = main.run(provider, {**cfg, "workers": workers}, tmp_path / name, tmp_path / f"{name}-state", send=False)
@@ -409,9 +410,15 @@ def test_grid_levels():
     assert "收盘价中位数" in g0["basis"] and g0["buy"][0]["yield"] is None
 
 
+def _mark_backfilled(state_dir):
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "state.json").write_text(json.dumps({"backfill_version": main.BACKFILL_VERSION}), "utf-8")
+
+
 def test_signal_days_counts_trading_days(tmp_path):
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text("utf-8"))
     cfg.update(request_interval=0)
+    _mark_backfilled(tmp_path / "s")
     days = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=3)
     first = main.run(CountingProvider(days[0], n=10), cfg, tmp_path / "w", tmp_path / "s", send=False)
     assert all(s["signal_days"] == 1 for s in first["stocks"])
@@ -420,3 +427,56 @@ def test_signal_days_counts_trading_days(tmp_path):
     for s in third["stocks"]:
         assert s["signal_days"] == (3 if before[s["code"]] == s["signal"] else 1)
     assert "grid" in json.loads((tmp_path / "w" / "data" / "stocks" / f"{s['code']}.json").read_text("utf-8"))
+
+
+def test_backtest_last_day_matches_live_signal():
+    from tracker import backtest
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text("utf-8"))
+    p = DemoProvider(n=12, end="2026-10-23")
+    for code in p.codes:
+        val, div = p.valuation(code), p.dividends(code)
+        hist = backtest.daily_signals(val, div, cfg["rules"], 5, 0.7)
+        m, _ = indicators.compute(val, div, 5, 0.7)
+        m["score"] = signals.score(m)["total"]
+        assert len(hist) == backtest.HORIZON
+        assert hist["signal"].iloc[-1] == signals.evaluate(m, cfg["rules"])[0]
+        assert hist["score"].iloc[-1] == pytest.approx(m["score"])
+
+
+def test_backtest_daily_cap_and_streaks():
+    from tracker import backtest
+
+    d = ["2026-10-21", "2026-10-22", "2026-10-23"]
+    h = {
+        "A": pd.DataFrame({"date": d, "signal": ["BUY", "BUY", "BUY"], "score": [90, 90, 90], "yield": [.06] * 3}),
+        "B": pd.DataFrame({"date": d, "signal": ["BUY", "BUY", "BUY"], "score": [80, 95, 95], "yield": [.06] * 3}),
+        "C": pd.DataFrame({"date": d, "signal": ["SELL", "HOLD", "SELL"], "score": [10] * 3, "yield": [.01] * 3}),
+    }
+    backtest.apply_daily_cap(h, 1)  # 每天只留评分最高的 1 只
+    assert list(h["A"]["signal"]) == ["BUY", "HOLD", "HOLD"]
+    assert list(h["B"]["signal"]) == ["HOLD", "BUY", "BUY"]
+    got = backtest.signal_streaks(h, {"A": "HOLD", "B": "BUY", "C": "SELL", "D": "BUY"})
+    assert got == {"A": ("2026-10-22", False), "B": ("2026-10-22", False), "C": ("2026-10-23", False)}
+    assert backtest.signal_streaks({"E": h["B"].iloc[1:]}, {"E": "BUY"}) == {"E": ("2026-10-22", True)}  # 到回测起点
+
+
+def test_backfill_runs_once_and_sets_since(tmp_path):
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text("utf-8"))
+    cfg.update(request_interval=0)
+    days = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=3)
+    res = main.run(CountingProvider(days[0], n=10), cfg, tmp_path / "w", tmp_path / "s", send=False)
+    state = json.loads((tmp_path / "s" / "state.json").read_text("utf-8"))
+    assert state["backfill_version"] == main.BACKFILL_VERSION
+    days_ = [s["signal_days"] for s in res["stocks"]]
+    assert max(days_) > 1 and all(1 <= d <= 245 for d in days_)  # 回测补出了多日
+    for s in res["stocks"]:
+        assert state["stocks"][s["code"]]["since"] == s["since"]
+        assert s["since_capped"] == (s["signal_days"] == 245)
+
+    # 第二次运行不再回测，天数在状态基础上累加
+    again = main.run(CountingProvider(days[2], n=10), cfg, tmp_path / "w", tmp_path / "s", send=False)
+    before = {s["code"]: (s["signal"], s["signal_days"]) for s in res["stocks"]}
+    for s in again["stocks"]:
+        sig, n = before[s["code"]]
+        assert s["signal_days"] == (n + 2 if s["signal"] == sig else 1)

@@ -14,8 +14,8 @@
   // 信号徽标：超出每日名额的买入候选单独标出
   const sigBadge = (s) => s.buy_candidate
     ? `<span class="sig CAND" title="符合买入条件，超出每日推荐名额">买入候选 #${s.buy_rank}</span>`
-    : `<span class="sig ${s.signal}"${s.since ? ` title="信号自 ${s.since} 起"` : ""}>${LABEL[s.signal]}${
-      s.signal !== "HOLD" && s.signal_days ? `<span class="days">${s.signal_days}天</span>` : ""}</span>`;
+    : `<span class="sig ${s.signal}"${s.since ? ` title="信号自 ${s.since} 起${s.since_capped ? "（回测近一年内一直未变，实际更久）" : ""}"` : ""}>${LABEL[s.signal]}${
+      s.signal !== "HOLD" && s.signal_days ? `<span class="days">${s.since_capped ? "≥" : ""}${s.signal_days}天</span>` : ""}</span>`;
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
   function quantile(arr, q) {

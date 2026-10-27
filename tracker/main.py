@@ -21,11 +21,12 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from . import indicators, notify, signals
+from . import backtest, indicators, notify, signals
 from .cache import HistoryCache, merge
 from .fetch import _retry
 
 ROOT = Path(__file__).resolve().parent.parent
+BACKFILL_VERSION = 1  # 用回测补充信号起始日期；状态中版本号不同时自动执行一次
 log = logging.getLogger("tracker")
 CST = timezone(timedelta(hours=8))
 
@@ -87,6 +88,7 @@ def diff_signals(stocks: list[dict], members: set[str], state: dict, data_date: 
             "name": s["name"],
             "signal": s["signal"],
             "since": p.get("since", data_date) if p.get("signal") == s["signal"] else data_date,
+            "since_capped": bool(p.get("since_capped")) and p.get("signal") == s["signal"],
             "last_alert": p.get("last_alert"),
         }
         if s["signal"] != p.get("signal") and s["signal"] in on and not recently_alerted(p, s["signal"]):
@@ -159,6 +161,24 @@ def load_industries(provider, codes: list[str], path: Path, max_age_days: int = 
     return {c: cache[c]["industry"].rstrip("Ⅱ").strip() if c in cache else "未知" for c in codes}
 
 
+def backfill_since(stocks: list[dict], history: dict[str, pd.DataFrame], state: dict, max_buys: int) -> None:
+    """用回测结果补充信号起始日期（只提前、不推后），写入 state 并标记已执行。"""
+    backtest.apply_daily_cap(history, max_buys)
+    streaks = backtest.signal_streaks(history, {s["code"]: s["signal"] for s in stocks})
+    entries = state.setdefault("stocks", {})
+    changed = 0
+    for s in stocks:
+        entry = entries.get(s["code"])
+        if s["code"] not in streaks or not entry or entry.get("signal") != s["signal"]:
+            continue
+        since, capped = streaks[s["code"]]
+        if not entry.get("since") or since < entry["since"]:
+            entry["since"], entry["since_capped"] = since, capped
+            changed += 1
+    state["backfill_version"] = BACKFILL_VERSION
+    log.info("回测补充信号起始日期：%d 只（回测 %d 只、最近 %d 个交易日）", changed, len(history), backtest.HORIZON)
+
+
 def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: bool = False,
         cache: HistoryCache | None = None) -> dict:
     rules = cfg["rules"]
@@ -167,6 +187,7 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
         shutil.rmtree(data_dir / "stocks")
 
     members = collect_members(provider, cfg, state_dir / "constituents.json")
+    need_backfill = demo or load_json(state_dir / "state.json", {}).get("backfill_version") != BACKFILL_VERSION
     index_names = {i["code"]: i["name"] for i in cfg["indices"]}
     log.info("共 %d 只成分股（去重后）", len(members))
 
@@ -174,7 +195,7 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
     industries = load_industries(provider, sorted(members), state_dir / "industries.json")
     incremental = incremental_valuations(provider, sorted(members), cache, cfg) if cache else {}
 
-    def fetch(code: str) -> tuple[dict, dict]:
+    def fetch(code: str) -> tuple[dict, dict, pd.DataFrame | None]:
         if code in incremental:
             val = incremental[code]
         else:
@@ -185,10 +206,13 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
         if not demo:
             time.sleep(cfg.get("request_interval", 0.5))
         grid = cfg.get("grid", {})
-        return indicators.compute(val, div, cfg["history_years"], rules["sell"]["dividend_cut_ratio"], grid)
+        m, series = indicators.compute(val, div, cfg["history_years"], rules["sell"]["dividend_cut_ratio"], grid)
+        hist = (backtest.daily_signals(val, div, rules, cfg["history_years"], rules["sell"]["dividend_cut_ratio"])
+                if need_backfill else None)
+        return m, series, hist
 
     # 耗时几乎全在网络请求上，多线程并发拉取；并发失败的再逐只串行补拉一次
-    results: dict[str, tuple[dict, dict]] = {}
+    results: dict[str, tuple[dict, dict, pd.DataFrame | None]] = {}
     errors: dict[str, Exception] = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(fetch, code): code for code in sorted(members)}
@@ -215,7 +239,7 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
         if code not in results:
             failed.append(code)
             continue
-        m, series = results[code]
+        m, series, _ = results[code]
         sc = signals.score(m)
         m["score"] = sc["total"]
         sig, reasons, quality = signals.evaluate(m, rules)
@@ -255,11 +279,19 @@ def run(provider, cfg: dict, web_dir: Path, state_dir: Path, send: bool, demo: b
             dump_json(state_path, state)
             dump_json(log_path, history)
 
+    if need_backfill:
+        backfill_since(stocks, {c: r[2] for c, r in results.items() if r[2] is not None}, state,
+                       int(rules["buy"].get("max_daily", 5)))
+        if not demo:
+            dump_json(state_path, state)
+
     prev = state.get("stocks", {})
     for s in stocks:
         # 状态里的起始日期只在信号一致时有效（同一天重复运行时状态不更新，信号可能已因规则调整而变化）
         p = prev.get(s["code"], {})
-        s["since"] = p.get("since") if p.get("signal") == s["signal"] else data_date
+        same = p.get("signal") == s["signal"]
+        s["since"] = p.get("since") if same else data_date
+        s["since_capped"] = bool(p.get("since_capped")) and same  # 信号在整个回测区间内未变，实际天数更长
         # 信号持续的交易日数（含当天），按该股自身的交易日计算
         s["signal_days"] = sum(d >= s["since"] for d in results[s["code"]][1]["dates"]) if s["since"] else None
 
